@@ -6,6 +6,7 @@ Canva에서 내보낸 PowerPoint 파일을 발표 전에 검사하는 Windows �
 
 - PPTX 드래그앤드롭 및 파일 선택
 - Canva 디자인 링크 입력 및 OAuth 계정 연결
+- `canva.com/design/...` 및 `canva.link/...` 단축 링크 지원
 - 공개 Canva 링크의 익명 접근·PPTX 다운로드 가능 여부 확인
 - 공개 Canva 링크를 다운로드하지 않고 현재 표시된 슬라이드의 텍스트·글꼴·배치·미디어 위험 사전 검사
 - 다운로드가 허용된 공개 링크의 PPTX 자동 수집 및 검사

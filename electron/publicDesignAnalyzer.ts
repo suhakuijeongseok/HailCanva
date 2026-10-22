@@ -1,5 +1,5 @@
 import { BrowserWindow, session } from "electron";
-import { parseCanvaDesignId } from "./canva";
+import { resolveCanvaLink } from "./canva";
 
 export type LinkRisk = {
   id: string;
@@ -171,10 +171,10 @@ function analyzeSnapshot(snapshot: PageSnapshot, zoom = 0.5): LinkSlideAnalysis 
 }
 
 export async function analyzePublicCanvaDesign(link: string): Promise<PublicDesignAnalysis> {
-  parseCanvaDesignId(link);
+  const resolvedLink = await resolveCanvaLink(link);
   const window = new BrowserWindow({ show: false, width: 1440, height: 960, webPreferences: { session: session.fromPartition("persist:hailcanva-public"), sandbox: true, contextIsolation: true } });
   try {
-    await window.loadURL(link);
+    await window.loadURL(resolvedLink);
     await wait(5_000);
     await clickText(window, "^(모든 쿠키 허용|accept all)");
     await wait(700);

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { app, BrowserWindow, session } from "electron";
-import { parseCanvaDesignId } from "./canva";
+import { resolveCanvaLink } from "./canva";
 
 export type PublicCanvaInspection = {
   access: "public" | "private" | "unreachable";
@@ -113,7 +113,7 @@ function publicSession() {
 }
 
 export async function openCanvaConsentWindow(link: string): Promise<void> {
-  parseCanvaDesignId(link);
+  const resolvedLink = await resolveCanvaLink(link);
   const window = new BrowserWindow({
     show: true,
     width: 1180,
@@ -127,7 +127,7 @@ export async function openCanvaConsentWindow(link: string): Promise<void> {
       sandbox: true,
     },
   });
-  await window.loadURL(link);
+  await window.loadURL(resolvedLink);
   await wait(2_000);
   await dismissCookieBanner(window);
   window.show();
@@ -136,7 +136,7 @@ export async function openCanvaConsentWindow(link: string): Promise<void> {
 }
 
 export async function inspectPublicCanvaLink(link: string): Promise<PublicCanvaInspection> {
-  parseCanvaDesignId(link);
+  const resolvedLink = await resolveCanvaLink(link);
   const isolatedSession = publicSession();
   const window = new BrowserWindow({
     show: false,
@@ -154,7 +154,7 @@ export async function inspectPublicCanvaLink(link: string): Promise<PublicCanvaI
   const tempDirectory = await fs.mkdtemp(path.join(app.getPath("temp"), "hailcanva-"));
   const downloadWatcher = watchForPptxDownload(isolatedSession, tempDirectory);
   try {
-    await window.loadURL(link, { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" });
+    await window.loadURL(resolvedLink, { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" });
     await wait(5_000);
     await dismissCookieBanner(window);
     const signals = await pageSignals(window);

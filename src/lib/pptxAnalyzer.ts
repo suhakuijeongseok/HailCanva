@@ -229,3 +229,15 @@ export async function replaceFont(bytes: Uint8Array, from: string, to: string): 
   }));
   return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }
+
+export async function replaceFontOnSlide(bytes: Uint8Array, from: string, to: string, slideNumber: number): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(bytes);
+  const name = `ppt/slides/slide${slideNumber}.xml`;
+  const entry = zip.file(name);
+  if (!entry) throw new Error(`${slideNumber}번 슬라이드를 찾지 못했습니다.`);
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(["'])${escaped}\\1`, "g");
+  const xml = await entry.async("string");
+  zip.file(name, xml.replace(pattern, (_match, quote: string) => `${quote}${to}${quote}`));
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+}

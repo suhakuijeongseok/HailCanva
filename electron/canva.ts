@@ -31,6 +31,7 @@ let accessToken: string | null = null;
 let refreshToken: string | null = null;
 let tokenExpiresAt = 0;
 let refreshPromise: Promise<void> | null = null;
+const resolvedLinkCache = new Map<string, string>();
 
 function tokenPath() {
   return path.join(app.getPath("userData"), "canva-session.bin");
@@ -234,6 +235,28 @@ export function parseCanvaDesignId(input: string): string {
   return decodeURIComponent(match[1]);
 }
 
+export async function resolveCanvaLink(input: string): Promise<string> {
+  const cached = resolvedLinkCache.get(input.trim());
+  if (cached) return cached;
+  let url: URL;
+  try { url = new URL(input.trim()); } catch { throw new Error("올바른 Canva 링크를 입력해 주세요."); }
+  const allowedInput = ["canva.com", "www.canva.com", "canva.link"].includes(url.hostname.toLocaleLowerCase());
+  if (!allowedInput || url.protocol !== "https:") throw new Error("canva.com 또는 canva.link의 HTTPS 링크만 사용할 수 있습니다.");
+  if (url.hostname.toLocaleLowerCase() !== "canva.link") {
+    parseCanvaDesignId(url.toString());
+    return url.toString();
+  }
+  const response = await fetch(url, { method: "HEAD", redirect: "follow", headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" } });
+  const resolved = new URL(response.url);
+  if (!["canva.com", "www.canva.com"].includes(resolved.hostname.toLocaleLowerCase())) {
+    throw new Error("Canva 단축 링크의 최종 디자인 주소를 확인하지 못했습니다.");
+  }
+  parseCanvaDesignId(resolved.toString());
+  const result = resolved.toString();
+  resolvedLinkCache.set(input.trim(), result);
+  return result;
+}
+
 async function canvaFetch<T>(path: string, init?: RequestInit): Promise<T> {
   await ensureAccessToken();
   let response = await fetch(`${API_BASE}${path}`, {
@@ -291,14 +314,16 @@ async function fetchExportImages(urls: string[]) {
 }
 
 export async function downloadCanvaPageImages(link: string) {
-  const designId = parseCanvaDesignId(link);
+  const resolvedLink = await resolveCanvaLink(link);
+  const designId = parseCanvaDesignId(resolvedLink);
   const job = await createExport(designId, { type: "png", as_single_image: false });
   if (!job.urls?.length) throw new Error("Canva가 페이지 이미지 주소를 반환하지 않았습니다.");
   return fetchExportImages(job.urls);
 }
 
 export async function downloadCanvaPptx(link: string): Promise<{ name: string; path: string; bytes: Uint8Array }> {
-  const designId = parseCanvaDesignId(link);
+  const resolvedLink = await resolveCanvaLink(link);
+  const designId = parseCanvaDesignId(resolvedLink);
   const metadata = await canvaFetch<{ design: { title?: string; design_types?: string[] } }>(`/designs/${encodeURIComponent(designId)}`);
   if (metadata.design.design_types && !metadata.design.design_types.includes("presentation")) {
     throw new Error("이 Canva 디자인은 프레젠테이션 형식이 아닙니다.");

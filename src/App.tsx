@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronRight, ExternalLink, FileUp, FileWarning, Link2, LoaderCircle, LogIn, Save, ShieldCheck, Type, X } from "lucide-react";
-import { analyzePptx, replaceFont } from "./lib/pptxAnalyzer";
+import { analyzePptx, replaceFont, replaceFontOnSlide } from "./lib/pptxAnalyzer";
 import { recommendFonts } from "./lib/fontMatcher";
 import type { PickedFile, PresentationAnalysis, Severity, SlideComparison } from "./types";
 
@@ -41,6 +41,22 @@ function badgeLabel(severity: Severity) {
   return severity === "safe" ? "안전" : severity === "warning" ? "주의" : "위험";
 }
 
+function riskSolution(category: PresentationAnalysis["slides"][number]["risks"][number]["category"]) {
+  const solutions = {
+    "missing-font": "아래에서 비슷한 설치 글꼴을 선택하세요. 이 카드의 교체는 현재 슬라이드에만 적용됩니다.",
+    "text-density": "내용을 두 개 이상의 텍스트 상자로 나누거나 문장을 줄이고, 상자의 높이를 넉넉하게 확보하세요.",
+    "text-box": "PowerPoint에서 텍스트 상자를 넓힌 뒤 자동 맞춤을 확인하고, 잘림 옵션 대신 크기 조정을 사용하세요.",
+    table: "표의 행 높이와 열 너비를 늘리고 글자 크기를 확인하세요. 모양 유지가 중요하면 표를 이미지로 고정하는 방법도 좋습니다.",
+    "unsupported-effect": "효과를 단순화하거나 Canva에서 해당 요소를 PNG로 내보내 PowerPoint의 이미지로 교체하세요.",
+    "small-text": "본문 글자 크기를 키우고 내용이 많다면 슬라이드를 나누세요.",
+    "long-token": "긴 URL이나 영문 문자열에 공백 또는 수동 줄바꿈을 넣어 상자 안에서 줄이 바뀌게 하세요.",
+    "edge-proximity": "요소를 슬라이드 안쪽으로 옮겨 가장자리에서 최소 3% 정도의 여백을 확보하세요.",
+    media: "동영상·오디오는 PowerPoint에서 다시 삽입하고, 발표 PC에서 재생 여부와 코덱을 확인하세요.",
+    "visual-difference": "두 이미지를 위아래로 비교해 달라진 표·텍스트 상자를 찾고, PowerPoint에서 크기와 줄바꿈을 직접 조정하세요.",
+  };
+  return solutions[category];
+}
+
 export default function App() {
   const [source, setSource] = useState<PickedFile | null>(null);
   const [analysis, setAnalysis] = useState<PresentationAnalysis | null>(null);
@@ -60,6 +76,7 @@ export default function App() {
   const [batchFontChoices, setBatchFontChoices] = useState<Record<string, string>>({});
   const [problemFilter, setProblemFilter] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const comparisonJob = useRef(0);
 
   const currentSlide = analysis?.slides.find((slide) => slide.number === selectedSlide);
   const currentComparison = slideComparisons.find((slide) => slide.slideNumber === selectedSlide);
@@ -79,9 +96,11 @@ export default function App() {
 
   useEffect(() => {
     void refreshCanvaStatus();
+    void window.hailCanva?.listFonts().then((fonts) => setInstalledFonts(fonts));
   }, []);
 
   const analyze = async (file: PickedFile) => {
+    const job = ++comparisonJob.current;
     setLoading(true);
     setSavedMessage("");
     setBatchFontChoices({});
@@ -89,25 +108,26 @@ export default function App() {
     setSlideComparisons([]);
     setComparisonError("");
     try {
-      const installedFonts = await window.hailCanva?.listFonts() ?? [];
-      setInstalledFonts(installedFonts);
-      const result = await analyzePptx(file.bytes, file.name, installedFonts);
+      const availableFonts = installedFonts.length ? installedFonts : await window.hailCanva?.listFonts() ?? [];
+      setInstalledFonts(availableFonts);
+      const result = await analyzePptx(file.bytes, file.name, availableFonts);
       setSource(file);
       setWorkingBytes(file.bytes);
       setAnalysis(result);
       setSelectedSlide(result.slides[0]?.number ?? 1);
-      if (/^https?:\/\/(?:www\.)?canva\.com\//i.test(file.path) && window.hailCanva) {
+      if (/^https?:\/\/(?:(?:www\.)?canva\.com|canva\.link)\//i.test(file.path) && window.hailCanva) {
         setConnectionMessage("Canva 원본과 PowerPoint 변환 이미지를 만들고 있습니다.");
-        try {
-          const comparisons = await window.hailCanva.compareCanvaSlides(file.path, file.bytes);
+        void window.hailCanva.compareCanvaSlides(file.path, file.bytes).then((comparisons) => {
+          if (comparisonJob.current !== job) return;
           setSlideComparisons(comparisons);
           setAnalysis((current) => current ? addVisualRisks(current, comparisons) : current);
           setConnectionMessage(comparisons.length ? "" : "비교할 슬라이드 이미지를 만들지 못했습니다.");
-        } catch (error) {
+        }).catch((error) => {
+          if (comparisonJob.current !== job) return;
           const message = error instanceof Error ? error.message : "슬라이드 비교 이미지를 만들지 못했습니다.";
           setComparisonError(message);
           setConnectionMessage(message);
-        }
+        });
       }
     } catch (error) {
       alert(`파일을 분석하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`);
@@ -247,14 +267,14 @@ export default function App() {
     }
   };
 
-  const fixFont = async (from: string, to: string) => {
+  const fixFont = async (from: string, to: string, slideNumber?: number) => {
     if (!workingBytes || !source) return;
     setLoading(true);
     try {
-      const updated = await replaceFont(workingBytes, from, to);
+      const updated = slideNumber === undefined ? await replaceFont(workingBytes, from, to) : await replaceFontOnSlide(workingBytes, from, to, slideNumber);
       setWorkingBytes(updated);
-      const installedFonts = await window.hailCanva?.listFonts() ?? [to];
-      const result = await analyzePptx(updated, source.name, [...installedFonts, to]);
+      const availableFonts = installedFonts.length ? installedFonts : await window.hailCanva?.listFonts() ?? [to];
+      const result = await analyzePptx(updated, source.name, [...availableFonts, to]);
       setAnalysis(result);
     } finally {
       setLoading(false);
@@ -280,7 +300,7 @@ export default function App() {
         <main className="landing">
           <section className="intro">
             <span className="eyebrow">CANVA → POWERPOINT</span>
-            <h1>발표 전에,<br/><em>깨질 곳부터</em> 찾으세요.</h1>
+            <h1><span>발표 전에,</span><span><em>깨질 곳부터</em></span><span>찾으세요.</span></h1>
             <p>공개 Canva 링크만으로 먼저 위험 요소를 찾고, 필요할 때만 PPTX 정밀 검사를 실행합니다.</p>
             <div className="feature-row">
               <span><Check size={16}/> 로컬 분석</span><span><Check size={16}/> 파일 외부 전송 없음</span><span><Check size={16}/> 수정본 저장</span>
@@ -291,7 +311,7 @@ export default function App() {
               <div className="link-heading"><span className="link-icon"><Link2/></span><div><h2>Canva 링크로 검사</h2><p>다운로드 없이 슬라이드의 텍스트와 배치를 먼저 확인합니다</p></div></div>
               <label htmlFor="canva-link">Canva 디자인 링크</label>
               <div className="link-input-row">
-                <input id="canva-link" value={canvaLink} onChange={(event) => setCanvaLink(event.target.value)} placeholder="https://www.canva.com/design/DAG.../edit" onFocus={() => void refreshCanvaStatus()}/>
+                <input id="canva-link" value={canvaLink} onChange={(event) => setCanvaLink(event.target.value)} placeholder="canva.com/design/... 또는 canva.link/..." onFocus={() => void refreshCanvaStatus()}/>
               </div>
               <div className="link-actions">
                 <button className="primary-button" onClick={() => void analyzePublicLink()} disabled={loading || !canvaLink.trim()}>링크 사전 검사 <ChevronRight size={17}/></button>
@@ -399,8 +419,8 @@ export default function App() {
                 {currentSlide?.risks.map((risk) => (
                   <article className={`risk-card ${risk.severity}`} key={risk.id}>
                     <AlertTriangle/>
-                    <div className="risk-copy"><b>{risk.title}</b><p>{risk.detail}</p></div>
-                    {risk.fontFamily && <select defaultValue="" onChange={(event) => { if (event.target.value) void fixFont(risk.fontFamily!, event.target.value); }}>
+                    <div className="risk-copy"><b>{risk.title}</b><p>{risk.detail}</p><div className="risk-solution"><strong>해결 방법</strong><span>{riskSolution(risk.category)}</span></div></div>
+                    {risk.fontFamily && <select defaultValue="" onChange={(event) => { if (event.target.value) void fixFont(risk.fontFamily!, event.target.value, risk.slideNumber); }}>
                       <option value="" disabled>글꼴 교체</option>
                       {(recommendFonts(risk.fontFamily, installedFonts).length ? recommendFonts(risk.fontFamily, installedFonts) : replacementOptions.filter(f => f !== risk.fontFamily)).map(font => <option key={font}>{font}</option>)}
                     </select>}

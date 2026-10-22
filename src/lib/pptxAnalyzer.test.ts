@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
-import { analyzePptx, replaceFont } from "./pptxAnalyzer";
+import { analyzePptx, replaceFont, replaceFontOnSlide } from "./pptxAnalyzer";
 
 async function fixture(font = "Rare Canva Font") {
   const zip = new JSZip();
@@ -43,5 +43,16 @@ describe("pptx analyzer", () => {
     zip.file("ppt/slides/slide1.xml", `<?xml version="1.0"?><p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:graphicFrame><p:xfrm><a:off x="800" y="100"/><a:ext cx="300" cy="300"/></p:xfrm><a:graphic><a:graphicData><a:tbl/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>`);
     const result = await analyzePptx(await zip.generateAsync({ type: "uint8array" }), "table.pptx", []);
     expect(result.slides[0].risks).toEqual(expect.arrayContaining([expect.objectContaining({ category: "table", severity: "danger" })]));
+  });
+
+  it("replaces a font on only the selected slide", async () => {
+    const zip = new JSZip();
+    const slide = (text: string) => `<?xml version="1.0"?><p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:rPr><a:latin typeface="Rare Canva Font"/></a:rPr><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+    zip.file("ppt/slides/slide1.xml", slide("one"));
+    zip.file("ppt/slides/slide2.xml", slide("two"));
+    const updated = await replaceFontOnSlide(await zip.generateAsync({ type: "uint8array" }), "Rare Canva Font", "Arial", 2);
+    const result = await analyzePptx(updated, "two-slides.pptx", ["Arial"]);
+    expect(result.slides[0].risks.some((risk) => risk.category === "missing-font")).toBe(true);
+    expect(result.slides[1].risks.some((risk) => risk.category === "missing-font")).toBe(false);
   });
 });
