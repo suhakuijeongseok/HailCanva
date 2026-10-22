@@ -1,9 +1,41 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronRight, ExternalLink, FileUp, FileWarning, Link2, LoaderCircle, LogIn, Save, ShieldCheck, Type, X } from "lucide-react";
 import { analyzePptx, replaceFont } from "./lib/pptxAnalyzer";
+import { recommendFonts } from "./lib/fontMatcher";
 import type { PickedFile, PresentationAnalysis, Severity, SlideComparison } from "./types";
 
 const replacementOptions = ["맑은 고딕", "Noto Sans KR", "Arial", "Calibri"];
+
+const problemGroups = [
+  { key: "font", label: "글꼴 문제", categories: ["missing-font"] },
+  { key: "text", label: "텍스트 상자", categories: ["text-density", "text-box", "small-text", "long-token", "edge-proximity"] },
+  { key: "table", label: "표·화면 차이", categories: ["table", "visual-difference"] },
+  { key: "effect", label: "효과·미디어", categories: ["unsupported-effect", "media"] },
+] as const;
+
+function addVisualRisks(analysis: PresentationAnalysis, comparisons: SlideComparison[]): PresentationAnalysis {
+  const slides = analysis.slides.map((slide) => {
+    const comparison = comparisons.find((item) => item.slideNumber === slide.number);
+    if (!comparison || slide.risks.some((risk) => risk.category === "visual-difference")) return slide;
+    const edgeProblem = comparison.edgeDifferencePercent >= 5;
+    const generalProblem = comparison.differencePercent >= 3.5;
+    if (!edgeProblem && !generalProblem) return slide;
+    const risk = {
+      id: `visual-difference-${slide.number}`,
+      slideNumber: slide.number,
+      severity: (comparison.differencePercent >= 10 || comparison.edgeDifferencePercent >= 12 ? "danger" : "warning") as "danger" | "warning",
+      category: "visual-difference" as const,
+      title: edgeProblem ? "변환 후 가장자리 또는 표 내용이 잘릴 수 있습니다" : "Canva 원본과 PowerPoint 화면 차이가 큽니다",
+      detail: `전체 화면의 ${comparison.differencePercent.toFixed(1)}%, 가장자리 영역의 ${comparison.edgeDifferencePercent.toFixed(1)}%가 다릅니다. 두 이미지를 비교해 표, 텍스트 상자, 줄바꿈을 확인하세요.`,
+    };
+    const risks = [...slide.risks, risk];
+    const penalty = risks.reduce((sum, item) => sum + (item.severity === "danger" ? 28 : 12), 0);
+    const score = Math.max(0, 100 - penalty);
+    return { ...slide, risks, score, severity: score >= 75 ? "safe" as const : score >= 45 ? "warning" as const : "danger" as const };
+  });
+  const score = slides.length ? Math.round(slides.reduce((sum, slide) => sum + slide.score, 0) / slides.length) : analysis.score;
+  return { ...analysis, slides, score };
+}
 
 function badgeLabel(severity: Severity) {
   return severity === "safe" ? "안전" : severity === "warning" ? "주의" : "위험";
@@ -24,6 +56,9 @@ export default function App() {
   const [needsConsent, setNeedsConsent] = useState(false);
   const [slideComparisons, setSlideComparisons] = useState<SlideComparison[]>([]);
   const [comparisonError, setComparisonError] = useState("");
+  const [installedFonts, setInstalledFonts] = useState<string[]>([]);
+  const [batchFontChoices, setBatchFontChoices] = useState<Record<string, string>>({});
+  const [problemFilter, setProblemFilter] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const currentSlide = analysis?.slides.find((slide) => slide.number === selectedSlide);
@@ -31,6 +66,16 @@ export default function App() {
   const riskCount = analysis?.slides.reduce((sum, slide) => sum + slide.risks.length, 0) ?? 0;
   const missingFonts = analysis?.fonts.filter((font) => !font.installed) ?? [];
   const level = analysis ? (analysis.score >= 75 ? "safe" : analysis.score >= 45 ? "warning" : "danger") : "safe";
+  const affectedSlides = analysis?.slides.filter((slide) => slide.risks.length > 0).length ?? 0;
+  const categoryCounts = useMemo(() => problemGroups.map((group) => ({
+    ...group,
+    count: analysis?.slides.reduce((sum, slide) => sum + slide.risks.filter((risk) => (group.categories as readonly string[]).includes(risk.category)).length, 0) ?? 0,
+  })), [analysis]);
+  const visibleSlides = useMemo(() => {
+    if (!analysis || !problemFilter) return analysis?.slides ?? [];
+    const group = problemGroups.find((item) => item.key === problemFilter);
+    return group ? analysis.slides.filter((slide) => slide.risks.some((risk) => (group.categories as readonly string[]).includes(risk.category))) : analysis.slides;
+  }, [analysis, problemFilter]);
 
   useEffect(() => {
     void refreshCanvaStatus();
@@ -39,10 +84,13 @@ export default function App() {
   const analyze = async (file: PickedFile) => {
     setLoading(true);
     setSavedMessage("");
+    setBatchFontChoices({});
+    setProblemFilter(null);
     setSlideComparisons([]);
     setComparisonError("");
     try {
       const installedFonts = await window.hailCanva?.listFonts() ?? [];
+      setInstalledFonts(installedFonts);
       const result = await analyzePptx(file.bytes, file.name, installedFonts);
       setSource(file);
       setWorkingBytes(file.bytes);
@@ -53,6 +101,7 @@ export default function App() {
         try {
           const comparisons = await window.hailCanva.compareCanvaSlides(file.path, file.bytes);
           setSlideComparisons(comparisons);
+          setAnalysis((current) => current ? addVisualRisks(current, comparisons) : current);
           setConnectionMessage(comparisons.length ? "" : "비교할 슬라이드 이미지를 만들지 못했습니다.");
         } catch (error) {
           const message = error instanceof Error ? error.message : "슬라이드 비교 이미지를 만들지 못했습니다.";
@@ -277,7 +326,6 @@ export default function App() {
             <div>
               <span className="eyebrow">{analysis.sourceType === "public-link" ? "LINK PREFLIGHT COMPLETE" : "ANALYSIS COMPLETE"}</span>
               <h1>{analysis.fileName}</h1>
-              <p>{analysis.slideCount}개 슬라이드 · {riskCount}개 잠재적 문제{analysis.sourceType === "public-link" ? " · 링크 기반 추정" : ""}</p>
               {analysis.scanNotice && <p className="scan-notice">{analysis.scanNotice}</p>}
             </div>
             <div className={`score-card ${level}`}>
@@ -287,15 +335,44 @@ export default function App() {
           </section>
 
           <section className="stat-grid">
-            <article><ShieldCheck/><div><strong>{analysis.slides.filter(s => s.severity === "safe").length}</strong><span>안전한 슬라이드</span></div></article>
+            <article><ShieldCheck/><div><strong>{affectedSlides}/{analysis.slideCount}</strong><span>확인이 필요한 슬라이드</span></div></article>
             <article><FileWarning/><div><strong>{riskCount}</strong><span>발견된 위험 요소</span></div></article>
             <article><Type/><div><strong>{analysis.sourceType === "public-link" ? analysis.fonts.length : missingFonts.length}</strong><span>{analysis.sourceType === "public-link" ? "감지된 글꼴" : "누락된 글꼴"}</span></div></article>
+          </section>
+
+          <section className="issue-panel">
+            <div className="issue-heading"><div><b>문제 분류</b><span>종류별 문제를 확인하고 반복 작업을 한 번에 처리합니다</span></div></div>
+            <div className="issue-categories">
+              {categoryCounts.map((group) => <button className={problemFilter === group.key ? "active" : ""} disabled={!group.count} key={group.key} onClick={() => {
+                const next = problemFilter === group.key ? null : group.key;
+                setProblemFilter(next);
+                if (next) {
+                  const sourceGroup = problemGroups.find((item) => item.key === next);
+                  const first = analysis.slides.find((slide) => slide.risks.some((risk) => sourceGroup && (sourceGroup.categories as readonly string[]).includes(risk.category)));
+                  if (first) setSelectedSlide(first.number);
+                }
+              }}><span>{group.label}</span><strong>{group.count}</strong></button>)}
+            </div>
+            {!!missingFonts.length && <div className="batch-fonts">
+              <b>누락 글꼴 일괄 교체</b>
+              {missingFonts.map((font) => {
+                const suggestions = recommendFonts(font.family, installedFonts);
+                return <div className="batch-font-row" key={font.family}>
+                  <span><b>{font.family}</b><small>{font.slides.length}개 슬라이드</small></span>
+                  <select value={batchFontChoices[font.family] ?? ""} onChange={(event) => setBatchFontChoices((current) => ({ ...current, [font.family]: event.target.value }))}>
+                    <option value="" disabled>비슷한 글꼴 선택</option>
+                    {suggestions.map((candidate) => <option key={candidate}>{candidate}</option>)}
+                  </select>
+                  <button className="secondary-button" disabled={!batchFontChoices[font.family]} onClick={() => void fixFont(font.family, batchFontChoices[font.family])}>전체 교체</button>
+                </div>;
+              })}
+            </div>}
           </section>
 
           <section className="workspace">
             <aside className="slide-list">
               <div className="section-title"><span>슬라이드</span><small>{analysis.scannedSlideCount === undefined ? analysis.slideCount : `${analysis.scannedSlideCount}/${analysis.slideCount} 검사`}</small></div>
-              {analysis.slides.map((slide) => (
+              {visibleSlides.map((slide) => (
                 <button key={slide.number} className={selectedSlide === slide.number ? "selected" : ""} onClick={() => setSelectedSlide(slide.number)}>
                   <span className="slide-number">{String(slide.number).padStart(2, "0")}</span>
                   <span className="slide-copy"><b>{slide.title}</b><small>{slide.risks.length ? `${slide.risks.length}개 확인 필요` : "문제 없음"}</small></span>
@@ -312,9 +389,10 @@ export default function App() {
               {currentComparison && <div className="visual-comparison">
                 <figure><figcaption>Canva 원본</figcaption><img src={currentComparison.canvaImage} alt={`Canva 원본 ${currentComparison.slideNumber}페이지`}/></figure>
                 <figure><figcaption>PowerPoint 변환</figcaption><img src={currentComparison.powerpointImage} alt={`PowerPoint 변환 ${currentComparison.slideNumber}페이지`}/></figure>
+                <div className="visual-difference-note">화면 차이 {currentComparison.differencePercent.toFixed(1)}% · 가장자리 차이 {currentComparison.edgeDifferencePercent.toFixed(1)}%</div>
               </div>}
               {!currentComparison && comparisonError && <div className="comparison-error"><AlertTriangle size={16}/><span>{comparisonError}</span></div>}
-              <div className="text-preview"><span>텍스트 미리보기</span><p>{currentSlide?.textPreview || "텍스트가 없는 슬라이드입니다."}</p></div>
+              <div className="text-preview"><span>PPTX 추출 텍스트</span><small>이미지에서 보이지 않는 잘림이나 누락을 원문과 대조하는 용도입니다.</small><p>{currentSlide?.textPreview || "텍스트가 없는 슬라이드입니다."}</p></div>
               <div className="risks">
                 <h3>위험 요소</h3>
                 {!currentSlide?.risks.length && <div className="empty-state"><Check/><div><b>발견된 문제가 없습니다</b><span>기본 호환성 검사 결과 안전합니다.</span></div></div>}
@@ -324,7 +402,7 @@ export default function App() {
                     <div className="risk-copy"><b>{risk.title}</b><p>{risk.detail}</p></div>
                     {risk.fontFamily && <select defaultValue="" onChange={(event) => { if (event.target.value) void fixFont(risk.fontFamily!, event.target.value); }}>
                       <option value="" disabled>글꼴 교체</option>
-                      {replacementOptions.filter(f => f !== risk.fontFamily).map(font => <option key={font}>{font}</option>)}
+                      {(recommendFonts(risk.fontFamily, installedFonts).length ? recommendFonts(risk.fontFamily, installedFonts) : replacementOptions.filter(f => f !== risk.fontFamily)).map(font => <option key={font}>{font}</option>)}
                     </select>}
                   </article>
                 ))}

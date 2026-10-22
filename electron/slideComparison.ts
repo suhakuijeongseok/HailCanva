@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, nativeImage } from "electron";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -10,6 +10,38 @@ const execFileAsync = promisify(execFile);
 
 function pngDataUrl(bytes: Uint8Array) {
   return `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+function compareImages(canvaBytes: Uint8Array, powerpointDataUrl: string) {
+  const width = 480;
+  const canvaSource = nativeImage.createFromBuffer(Buffer.from(canvaBytes));
+  const powerpointSource = nativeImage.createFromDataURL(powerpointDataUrl);
+  if (canvaSource.isEmpty() || powerpointSource.isEmpty()) return { differencePercent: 0, edgeDifferencePercent: 0 };
+  const ratio = canvaSource.getSize().height / Math.max(canvaSource.getSize().width, 1);
+  const height = Math.max(1, Math.round(width * ratio));
+  const canva = canvaSource.resize({ width, height }).toBitmap();
+  const powerpoint = powerpointSource.resize({ width, height }).toBitmap();
+  let different = 0;
+  let edgeDifferent = 0;
+  let edgePixels = 0;
+  const pixels = Math.min(canva.length, powerpoint.length) / 4;
+  for (let index = 0; index < pixels; index += 1) {
+    const offset = index * 4;
+    const delta = Math.abs(canva[offset] - powerpoint[offset]) + Math.abs(canva[offset + 1] - powerpoint[offset + 1]) + Math.abs(canva[offset + 2] - powerpoint[offset + 2]);
+    const changed = delta > 75;
+    if (changed) different += 1;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    const isEdge = x >= width * 0.9 || y >= height * 0.9;
+    if (isEdge) {
+      edgePixels += 1;
+      if (changed) edgeDifferent += 1;
+    }
+  }
+  return {
+    differencePercent: pixels ? Math.round(different / pixels * 10_000) / 100 : 0,
+    edgeDifferencePercent: edgePixels ? Math.round(edgeDifferent / edgePixels * 10_000) / 100 : 0,
+  };
 }
 
 export async function renderPowerPoint(bytes: Uint8Array) {
@@ -63,9 +95,13 @@ export async function createSlideComparisons(link: string, pptxBytes: Uint8Array
     renderPowerPoint(pptxBytes),
   ]);
   const count = Math.min(canvaImages.length, powerpointImages.length);
-  return Array.from({ length: count }, (_, index) => ({
-    slideNumber: index + 1,
-    canvaImage: pngDataUrl(canvaImages[index]),
-    powerpointImage: powerpointImages[index],
-  }));
+  return Array.from({ length: count }, (_, index) => {
+    const metrics = compareImages(canvaImages[index], powerpointImages[index]);
+    return {
+      slideNumber: index + 1,
+      canvaImage: pngDataUrl(canvaImages[index]),
+      powerpointImage: powerpointImages[index],
+      ...metrics,
+    };
+  });
 }

@@ -36,4 +36,12 @@ describe("pptx analyzer", () => {
     expect(result.fonts[0]).toMatchObject({ family: "Tlab 월광소나타", installed: true, embedded: true });
     expect(result.slides[0].risks).not.toEqual(expect.arrayContaining([expect.objectContaining({ category: "missing-font" })]));
   });
+
+  it("reports a table that reaches beyond the slide boundary", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/presentation.xml", `<?xml version="1.0"?><p:presentation xmlns:p="p"><p:sldSz cx="1000" cy="600"/></p:presentation>`);
+    zip.file("ppt/slides/slide1.xml", `<?xml version="1.0"?><p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:graphicFrame><p:xfrm><a:off x="800" y="100"/><a:ext cx="300" cy="300"/></p:xfrm><a:graphic><a:graphicData><a:tbl/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>`);
+    const result = await analyzePptx(await zip.generateAsync({ type: "uint8array" }), "table.pptx", []);
+    expect(result.slides[0].risks).toEqual(expect.arrayContaining([expect.objectContaining({ category: "table", severity: "danger" })]));
+  });
 });

@@ -12,7 +12,7 @@ export interface Risk {
   id: string;
   slideNumber: number;
   severity: Exclude<Severity, "safe">;
-  category: "missing-font" | "text-density" | "unsupported-effect" | "small-text" | "long-token" | "edge-proximity" | "media";
+  category: "missing-font" | "text-density" | "text-box" | "table" | "unsupported-effect" | "small-text" | "long-token" | "edge-proximity" | "media" | "visual-difference";
   title: string;
   detail: string;
   fontFamily?: string;
@@ -50,6 +50,8 @@ export interface SlideComparison {
   slideNumber: number;
   canvaImage: string;
   powerpointImage: string;
+  differencePercent: number;
+  edgeDifferencePercent: number;
 }
 
 declare global {
