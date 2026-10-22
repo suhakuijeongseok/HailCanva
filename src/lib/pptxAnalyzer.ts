@@ -47,6 +47,23 @@ function getFonts(doc: unknown): string[] {
   return fonts;
 }
 
+function normalizeFontName(font: string) {
+  return font.normalize("NFKC").replace(/^@/, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function getEmbeddedFonts(doc: unknown): string[] {
+  const fonts: string[] = [];
+  walk(doc, (key, value) => {
+    if (key !== "p:embeddedFont" || !value || typeof value !== "object") return;
+    for (const font of arrayify((value as Record<string, unknown>)["p:font"])) {
+      if (!font || typeof font !== "object") continue;
+      const typeface = (font as Record<string, unknown>)["@_typeface"];
+      if (typeof typeface === "string" && typeface.trim()) fonts.push(typeface.trim());
+    }
+  });
+  return fonts;
+}
+
 function getTextBoxDensityRisks(doc: unknown, slideNumber: number): Risk[] {
   const risks: Risk[] = [];
   let index = 0;
@@ -89,6 +106,41 @@ function getEffectRisks(xml: string, slideNumber: number): Risk[] {
   }] : []);
 }
 
+function getLayoutRisks(xml: string, slideNumber: number, slideWidth: number, slideHeight: number): Risk[] {
+  const risks: Risk[] = [];
+  if (/vertOverflow="clip"/i.test(xml)) {
+    risks.push({
+      id: `text-box-clip-${slideNumber}`,
+      slideNumber,
+      severity: "warning",
+      category: "text-box",
+      title: "잘림 설정이 있는 텍스트 상자",
+      detail: "PowerPoint에서 글꼴이나 줄바꿈이 달라지면 상자 밖의 텍스트가 숨겨질 수 있습니다.",
+    });
+  }
+  const frames = xml.match(/<p:graphicFrame>[\s\S]*?<\/p:graphicFrame>/g) ?? [];
+  frames.forEach((frame, index) => {
+    if (!/<a:tbl\b/.test(frame)) return;
+    const transform = frame.match(/<a:off x="(\d+)" y="(\d+)"\s*\/>[\s\S]*?<a:ext cx="(\d+)" cy="(\d+)"\s*\/>/);
+    if (!transform || !slideWidth || !slideHeight) return;
+    const [, x, y, width, height] = transform.map(Number);
+    const rightGap = slideWidth - (x + width);
+    const bottomGap = slideHeight - (y + height);
+    const outside = rightGap < 0 || bottomGap < 0 || x < 0 || y < 0;
+    const nearEdge = rightGap < slideWidth * 0.015 || bottomGap < slideHeight * 0.015 || x < slideWidth * 0.015 || y < slideHeight * 0.015;
+    if (!outside && !nearEdge) return;
+    risks.push({
+      id: `table-edge-${slideNumber}-${index}`,
+      slideNumber,
+      severity: outside ? "danger" : "warning",
+      category: "table",
+      title: outside ? "표가 슬라이드 영역을 벗어납니다" : "표가 슬라이드 가장자리에 가깝습니다",
+      detail: outside ? "PowerPoint 변환 과정에서 표의 행이나 열이 잘릴 가능성이 높습니다." : "렌더링 차이로 표 테두리나 셀 내용이 잘리지 않는지 비교 이미지를 확인하세요.",
+    });
+  });
+  return risks;
+}
+
 function severityFor(score: number): Severity {
   if (score >= 75) return "safe";
   if (score >= 45) return "warning";
@@ -100,7 +152,12 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
   const slideFiles = Object.keys(zip.files)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
     .sort((a, b) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
-  const installed = new Set(installedFonts.map((font) => font.toLocaleLowerCase()));
+  const presentationXml = await zip.file("ppt/presentation.xml")?.async("string");
+  const slideSize = presentationXml?.match(/<p:sldSz[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/);
+  const slideWidth = Number(slideSize?.[1] || 0);
+  const slideHeight = Number(slideSize?.[2] || 0);
+  const embedded = new Set(presentationXml ? getEmbeddedFonts(parser.parse(presentationXml)).map(normalizeFontName) : []);
+  const installed = new Set(installedFonts.map(normalizeFontName));
   const usage = new Map<string, { count: number; slides: Set<number> }>();
   const slides: SlideAnalysis[] = [];
 
@@ -110,7 +167,7 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
     const doc = parser.parse(xml);
     const texts = getTexts(doc);
     const fonts = getFonts(doc);
-    const risks: Risk[] = [...getTextBoxDensityRisks(doc, slideNumber), ...getEffectRisks(xml, slideNumber)];
+    const risks: Risk[] = [...getTextBoxDensityRisks(doc, slideNumber), ...getEffectRisks(xml, slideNumber), ...getLayoutRisks(xml, slideNumber, slideWidth, slideHeight)];
 
     for (const font of fonts) {
       const current = usage.get(font) ?? { count: 0, slides: new Set<number>() };
@@ -120,8 +177,8 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
     }
 
     for (const font of new Set(fonts)) {
-      const normalized = font.toLocaleLowerCase();
-      if (!installed.has(normalized)) {
+      const normalized = normalizeFontName(font);
+      if (!installed.has(normalized) && !embedded.has(normalized)) {
         risks.push({
           id: `font-${slideNumber}-${font}`,
           slideNumber,
@@ -148,7 +205,8 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
 
   const fonts: FontUsage[] = [...usage.entries()].map(([family, data]) => ({
     family,
-    installed: installed.has(family.toLocaleLowerCase()),
+    installed: installed.has(normalizeFontName(family)) || embedded.has(normalizeFontName(family)),
+    embedded: embedded.has(normalizeFontName(family)),
     occurrences: data.count,
     slides: [...data.slides].sort((a, b) => a - b),
   })).sort((a, b) => Number(a.installed) - Number(b.installed) || b.occurrences - a.occurrences);

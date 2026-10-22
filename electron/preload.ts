@@ -9,4 +9,6 @@ contextBridge.exposeInMainWorld("hailCanva", {
   downloadCanvaPptx: (link: string) => ipcRenderer.invoke("canva:downloadPptx", link),
   inspectPublicCanva: (link: string) => ipcRenderer.invoke("canva:inspectPublic", link),
   openCanvaConsent: (link: string) => ipcRenderer.invoke("canva:openConsent", link),
+  analyzePublicCanva: (link: string) => ipcRenderer.invoke("canva:analyzePublic", link),
+  compareCanvaSlides: (link: string, bytes: Uint8Array) => ipcRenderer.invoke("canva:compareSlides", link, bytes),
 });

@@ -1,9 +1,41 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronRight, ExternalLink, FileUp, FileWarning, Link2, LoaderCircle, LogIn, Save, ShieldCheck, Type, X } from "lucide-react";
 import { analyzePptx, replaceFont } from "./lib/pptxAnalyzer";
-import type { PickedFile, PresentationAnalysis, Severity } from "./types";
+import { recommendFonts } from "./lib/fontMatcher";
+import type { PickedFile, PresentationAnalysis, Severity, SlideComparison } from "./types";
 
 const replacementOptions = ["맑은 고딕", "Noto Sans KR", "Arial", "Calibri"];
+
+const problemGroups = [
+  { key: "font", label: "글꼴 문제", categories: ["missing-font"] },
+  { key: "text", label: "텍스트 상자", categories: ["text-density", "text-box", "small-text", "long-token", "edge-proximity"] },
+  { key: "table", label: "표·화면 차이", categories: ["table", "visual-difference"] },
+  { key: "effect", label: "효과·미디어", categories: ["unsupported-effect", "media"] },
+] as const;
+
+function addVisualRisks(analysis: PresentationAnalysis, comparisons: SlideComparison[]): PresentationAnalysis {
+  const slides = analysis.slides.map((slide) => {
+    const comparison = comparisons.find((item) => item.slideNumber === slide.number);
+    if (!comparison || slide.risks.some((risk) => risk.category === "visual-difference")) return slide;
+    const edgeProblem = comparison.edgeDifferencePercent >= 5;
+    const generalProblem = comparison.differencePercent >= 3.5;
+    if (!edgeProblem && !generalProblem) return slide;
+    const risk = {
+      id: `visual-difference-${slide.number}`,
+      slideNumber: slide.number,
+      severity: (comparison.differencePercent >= 10 || comparison.edgeDifferencePercent >= 12 ? "danger" : "warning") as "danger" | "warning",
+      category: "visual-difference" as const,
+      title: edgeProblem ? "변환 후 가장자리 또는 표 내용이 잘릴 수 있습니다" : "Canva 원본과 PowerPoint 화면 차이가 큽니다",
+      detail: `전체 화면의 ${comparison.differencePercent.toFixed(1)}%, 가장자리 영역의 ${comparison.edgeDifferencePercent.toFixed(1)}%가 다릅니다. 두 이미지를 비교해 표, 텍스트 상자, 줄바꿈을 확인하세요.`,
+    };
+    const risks = [...slide.risks, risk];
+    const penalty = risks.reduce((sum, item) => sum + (item.severity === "danger" ? 28 : 12), 0);
+    const score = Math.max(0, 100 - penalty);
+    return { ...slide, risks, score, severity: score >= 75 ? "safe" as const : score >= 45 ? "warning" as const : "danger" as const };
+  });
+  const score = slides.length ? Math.round(slides.reduce((sum, slide) => sum + slide.score, 0) / slides.length) : analysis.score;
+  return { ...analysis, slides, score };
+}
 
 function badgeLabel(severity: Severity) {
   return severity === "safe" ? "안전" : severity === "warning" ? "주의" : "위험";
@@ -22,12 +54,28 @@ export default function App() {
   const [canvaConfigured, setCanvaConfigured] = useState(true);
   const [connectionMessage, setConnectionMessage] = useState("");
   const [needsConsent, setNeedsConsent] = useState(false);
+  const [slideComparisons, setSlideComparisons] = useState<SlideComparison[]>([]);
+  const [comparisonError, setComparisonError] = useState("");
+  const [installedFonts, setInstalledFonts] = useState<string[]>([]);
+  const [batchFontChoices, setBatchFontChoices] = useState<Record<string, string>>({});
+  const [problemFilter, setProblemFilter] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const currentSlide = analysis?.slides.find((slide) => slide.number === selectedSlide);
+  const currentComparison = slideComparisons.find((slide) => slide.slideNumber === selectedSlide);
   const riskCount = analysis?.slides.reduce((sum, slide) => sum + slide.risks.length, 0) ?? 0;
   const missingFonts = analysis?.fonts.filter((font) => !font.installed) ?? [];
   const level = analysis ? (analysis.score >= 75 ? "safe" : analysis.score >= 45 ? "warning" : "danger") : "safe";
+  const affectedSlides = analysis?.slides.filter((slide) => slide.risks.length > 0).length ?? 0;
+  const categoryCounts = useMemo(() => problemGroups.map((group) => ({
+    ...group,
+    count: analysis?.slides.reduce((sum, slide) => sum + slide.risks.filter((risk) => (group.categories as readonly string[]).includes(risk.category)).length, 0) ?? 0,
+  })), [analysis]);
+  const visibleSlides = useMemo(() => {
+    if (!analysis || !problemFilter) return analysis?.slides ?? [];
+    const group = problemGroups.find((item) => item.key === problemFilter);
+    return group ? analysis.slides.filter((slide) => slide.risks.some((risk) => (group.categories as readonly string[]).includes(risk.category))) : analysis.slides;
+  }, [analysis, problemFilter]);
 
   useEffect(() => {
     void refreshCanvaStatus();
@@ -36,13 +84,31 @@ export default function App() {
   const analyze = async (file: PickedFile) => {
     setLoading(true);
     setSavedMessage("");
+    setBatchFontChoices({});
+    setProblemFilter(null);
+    setSlideComparisons([]);
+    setComparisonError("");
     try {
       const installedFonts = await window.hailCanva?.listFonts() ?? [];
+      setInstalledFonts(installedFonts);
       const result = await analyzePptx(file.bytes, file.name, installedFonts);
       setSource(file);
       setWorkingBytes(file.bytes);
       setAnalysis(result);
       setSelectedSlide(result.slides[0]?.number ?? 1);
+      if (/^https?:\/\/(?:www\.)?canva\.com\//i.test(file.path) && window.hailCanva) {
+        setConnectionMessage("Canva 원본과 PowerPoint 변환 이미지를 만들고 있습니다.");
+        try {
+          const comparisons = await window.hailCanva.compareCanvaSlides(file.path, file.bytes);
+          setSlideComparisons(comparisons);
+          setAnalysis((current) => current ? addVisualRisks(current, comparisons) : current);
+          setConnectionMessage(comparisons.length ? "" : "비교할 슬라이드 이미지를 만들지 못했습니다.");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "슬라이드 비교 이미지를 만들지 못했습니다.";
+          setComparisonError(message);
+          setConnectionMessage(message);
+        }
+      }
     } catch (error) {
       alert(`파일을 분석하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`);
     } finally {
@@ -94,8 +160,16 @@ export default function App() {
     if (!window.hailCanva || !canvaLink.trim()) return;
     setLoading(true);
     setNeedsConsent(false);
-    setConnectionMessage("공개 여부와 PPTX 다운로드 가능 여부를 확인하고 있습니다.");
+    setConnectionMessage("Canva 연결 상태와 PPTX 다운로드 가능 여부를 확인하고 있습니다.");
     try {
+      const status = await refreshCanvaStatus();
+      if (status?.connected) {
+        setConnectionMessage("저장된 Canva 계정으로 PPTX를 가져오고 있습니다.");
+        const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
+        await analyze(file);
+        return;
+      }
+
       let publicResult = await window.hailCanva.inspectPublicCanva(canvaLink);
       if (publicResult.file) {
         setConnectionMessage(publicResult.message);
@@ -121,17 +195,37 @@ export default function App() {
         setNeedsConsent(false);
       }
 
+      setConnectionMessage(publicResult.message);
+    } catch (error) {
+      setConnectionMessage(error instanceof Error ? error.message : "Canva 링크를 가져오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const analyzePublicLink = async () => {
+    if (!window.hailCanva || !canvaLink.trim()) return;
+    setLoading(true);
+    setNeedsConsent(false);
+    setConnectionMessage("Canva 연결 상태를 확인하고 있습니다.");
+    try {
       const status = await refreshCanvaStatus();
       if (status?.connected) {
-        setConnectionMessage(`${publicResult.message} 연결된 Canva 계정으로 다시 확인합니다.`);
+        setConnectionMessage("연결된 Canva 계정으로 전체 PPTX를 가져와 검사하고 있습니다.");
         const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
         await analyze(file);
         return;
       }
 
-      setConnectionMessage(publicResult.message);
+      setConnectionMessage("공개 Canva 슬라이드의 텍스트와 배치를 수집하고 있습니다.");
+      const result = await window.hailCanva.analyzePublicCanva(canvaLink);
+      setSource(null);
+      setWorkingBytes(null);
+      setAnalysis(result);
+      setSelectedSlide(result.slides[0]?.number ?? 1);
+      setConnectionMessage("");
     } catch (error) {
-      setConnectionMessage(error instanceof Error ? error.message : "Canva 링크를 가져오지 못했습니다.");
+      setConnectionMessage(error instanceof Error ? error.message : "공개 Canva 디자인을 분석하지 못했습니다.");
     } finally {
       setLoading(false);
     }
@@ -179,7 +273,7 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">H</span><span>HailCanva</span><small>PowerPoint Preflight</small></div>
-        {analysis && <button className="secondary-button" onClick={() => { setAnalysis(null); setSource(null); }}><X size={16}/> 다른 파일</button>}
+        {analysis && <button className="secondary-button" onClick={() => { setAnalysis(null); setSource(null); setSlideComparisons([]); setComparisonError(""); }}><X size={16}/> 다른 파일</button>}
       </header>
 
       {!analysis ? (
@@ -187,18 +281,21 @@ export default function App() {
           <section className="intro">
             <span className="eyebrow">CANVA → POWERPOINT</span>
             <h1>발표 전에,<br/><em>깨질 곳부터</em> 찾으세요.</h1>
-            <p>Canva에서 내려받은 PPTX의 글꼴과 텍스트, 특수 효과를 슬라이드별로 검사합니다.</p>
+            <p>공개 Canva 링크만으로 먼저 위험 요소를 찾고, 필요할 때만 PPTX 정밀 검사를 실행합니다.</p>
             <div className="feature-row">
               <span><Check size={16}/> 로컬 분석</span><span><Check size={16}/> 파일 외부 전송 없음</span><span><Check size={16}/> 수정본 저장</span>
             </div>
           </section>
           <section className="import-panel">
             <div className="link-import">
-              <div className="link-heading"><span className="link-icon"><Link2/></span><div><h2>Canva 링크로 검사</h2><p>공개 여부와 다운로드 가능 여부를 자동 확인합니다</p></div></div>
+              <div className="link-heading"><span className="link-icon"><Link2/></span><div><h2>Canva 링크로 검사</h2><p>다운로드 없이 슬라이드의 텍스트와 배치를 먼저 확인합니다</p></div></div>
               <label htmlFor="canva-link">Canva 디자인 링크</label>
               <div className="link-input-row">
                 <input id="canva-link" value={canvaLink} onChange={(event) => setCanvaLink(event.target.value)} placeholder="https://www.canva.com/design/DAG.../edit" onFocus={() => void refreshCanvaStatus()}/>
-                <button className="primary-button" onClick={() => void analyzeCanvaLink()} disabled={loading || !canvaLink.trim()}>검사 <ChevronRight size={17}/></button>
+              </div>
+              <div className="link-actions">
+                <button className="primary-button" onClick={() => void analyzePublicLink()} disabled={loading || !canvaLink.trim()}>링크 사전 검사 <ChevronRight size={17}/></button>
+                <button className="secondary-button" onClick={() => void analyzeCanvaLink()} disabled={loading || !canvaLink.trim()}>PPTX 정밀 검사</button>
               </div>
               <div className="connection-row">
                 <span className={`connection-dot ${canvaConnected ? "online" : ""}`}/>
@@ -227,26 +324,55 @@ export default function App() {
         <main className="dashboard">
           <section className="summary-panel">
             <div>
-              <span className="eyebrow">ANALYSIS COMPLETE</span>
+              <span className="eyebrow">{analysis.sourceType === "public-link" ? "LINK PREFLIGHT COMPLETE" : "ANALYSIS COMPLETE"}</span>
               <h1>{analysis.fileName}</h1>
-              <p>{analysis.slideCount}개 슬라이드 · {riskCount}개 잠재적 문제</p>
+              {analysis.scanNotice && <p className="scan-notice">{analysis.scanNotice}</p>}
             </div>
             <div className={`score-card ${level}`}>
               <div className="score-ring"><strong>{analysis.score}</strong><span>/ 100</span></div>
-              <div><b>호환성 점수</b><span>{level === "safe" ? "발표 준비가 양호합니다" : "수정 후 다시 확인하세요"}</span></div>
+              <div><b>{analysis.sourceType === "public-link" ? "사전 위험 점수" : "호환성 점수"}</b><span>{level === "safe" ? "발표 준비가 양호합니다" : "위험 요소를 확인하세요"}</span></div>
             </div>
           </section>
 
           <section className="stat-grid">
-            <article><ShieldCheck/><div><strong>{analysis.slides.filter(s => s.severity === "safe").length}</strong><span>안전한 슬라이드</span></div></article>
+            <article><ShieldCheck/><div><strong>{affectedSlides}/{analysis.slideCount}</strong><span>확인이 필요한 슬라이드</span></div></article>
             <article><FileWarning/><div><strong>{riskCount}</strong><span>발견된 위험 요소</span></div></article>
-            <article><Type/><div><strong>{missingFonts.length}</strong><span>누락된 글꼴</span></div></article>
+            <article><Type/><div><strong>{analysis.sourceType === "public-link" ? analysis.fonts.length : missingFonts.length}</strong><span>{analysis.sourceType === "public-link" ? "감지된 글꼴" : "누락된 글꼴"}</span></div></article>
+          </section>
+
+          <section className="issue-panel">
+            <div className="issue-heading"><div><b>문제 분류</b><span>종류별 문제를 확인하고 반복 작업을 한 번에 처리합니다</span></div></div>
+            <div className="issue-categories">
+              {categoryCounts.map((group) => <button className={problemFilter === group.key ? "active" : ""} disabled={!group.count} key={group.key} onClick={() => {
+                const next = problemFilter === group.key ? null : group.key;
+                setProblemFilter(next);
+                if (next) {
+                  const sourceGroup = problemGroups.find((item) => item.key === next);
+                  const first = analysis.slides.find((slide) => slide.risks.some((risk) => sourceGroup && (sourceGroup.categories as readonly string[]).includes(risk.category)));
+                  if (first) setSelectedSlide(first.number);
+                }
+              }}><span>{group.label}</span><strong>{group.count}</strong></button>)}
+            </div>
+            {!!missingFonts.length && <div className="batch-fonts">
+              <b>누락 글꼴 일괄 교체</b>
+              {missingFonts.map((font) => {
+                const suggestions = recommendFonts(font.family, installedFonts);
+                return <div className="batch-font-row" key={font.family}>
+                  <span><b>{font.family}</b><small>{font.slides.length}개 슬라이드</small></span>
+                  <select value={batchFontChoices[font.family] ?? ""} onChange={(event) => setBatchFontChoices((current) => ({ ...current, [font.family]: event.target.value }))}>
+                    <option value="" disabled>비슷한 글꼴 선택</option>
+                    {suggestions.map((candidate) => <option key={candidate}>{candidate}</option>)}
+                  </select>
+                  <button className="secondary-button" disabled={!batchFontChoices[font.family]} onClick={() => void fixFont(font.family, batchFontChoices[font.family])}>전체 교체</button>
+                </div>;
+              })}
+            </div>}
           </section>
 
           <section className="workspace">
             <aside className="slide-list">
-              <div className="section-title"><span>슬라이드</span><small>{analysis.slideCount}</small></div>
-              {analysis.slides.map((slide) => (
+              <div className="section-title"><span>슬라이드</span><small>{analysis.scannedSlideCount === undefined ? analysis.slideCount : `${analysis.scannedSlideCount}/${analysis.slideCount} 검사`}</small></div>
+              {visibleSlides.map((slide) => (
                 <button key={slide.number} className={selectedSlide === slide.number ? "selected" : ""} onClick={() => setSelectedSlide(slide.number)}>
                   <span className="slide-number">{String(slide.number).padStart(2, "0")}</span>
                   <span className="slide-copy"><b>{slide.title}</b><small>{slide.risks.length ? `${slide.risks.length}개 확인 필요` : "문제 없음"}</small></span>
@@ -260,7 +386,13 @@ export default function App() {
                 <div><span className="eyebrow">SLIDE {currentSlide?.number}</span><h2>{currentSlide?.title}</h2></div>
                 <span className={`severity-badge ${currentSlide?.severity}`}>{badgeLabel(currentSlide?.severity ?? "safe")}</span>
               </div>
-              <div className="text-preview"><span>텍스트 미리보기</span><p>{currentSlide?.textPreview || "텍스트가 없는 슬라이드입니다."}</p></div>
+              {currentComparison && <div className="visual-comparison">
+                <figure><figcaption>Canva 원본</figcaption><img src={currentComparison.canvaImage} alt={`Canva 원본 ${currentComparison.slideNumber}페이지`}/></figure>
+                <figure><figcaption>PowerPoint 변환</figcaption><img src={currentComparison.powerpointImage} alt={`PowerPoint 변환 ${currentComparison.slideNumber}페이지`}/></figure>
+                <div className="visual-difference-note">화면 차이 {currentComparison.differencePercent.toFixed(1)}% · 가장자리 차이 {currentComparison.edgeDifferencePercent.toFixed(1)}%</div>
+              </div>}
+              {!currentComparison && comparisonError && <div className="comparison-error"><AlertTriangle size={16}/><span>{comparisonError}</span></div>}
+              <div className="text-preview"><span>PPTX 추출 텍스트</span><small>이미지에서 보이지 않는 잘림이나 누락을 원문과 대조하는 용도입니다.</small><p>{currentSlide?.textPreview || "텍스트가 없는 슬라이드입니다."}</p></div>
               <div className="risks">
                 <h3>위험 요소</h3>
                 {!currentSlide?.risks.length && <div className="empty-state"><Check/><div><b>발견된 문제가 없습니다</b><span>기본 호환성 검사 결과 안전합니다.</span></div></div>}
@@ -270,7 +402,7 @@ export default function App() {
                     <div className="risk-copy"><b>{risk.title}</b><p>{risk.detail}</p></div>
                     {risk.fontFamily && <select defaultValue="" onChange={(event) => { if (event.target.value) void fixFont(risk.fontFamily!, event.target.value); }}>
                       <option value="" disabled>글꼴 교체</option>
-                      {replacementOptions.filter(f => f !== risk.fontFamily).map(font => <option key={font}>{font}</option>)}
+                      {(recommendFonts(risk.fontFamily, installedFonts).length ? recommendFonts(risk.fontFamily, installedFonts) : replacementOptions.filter(f => f !== risk.fontFamily)).map(font => <option key={font}>{font}</option>)}
                     </select>}
                   </article>
                 ))}
@@ -281,14 +413,14 @@ export default function App() {
               <div className="section-title"><span>사용 글꼴</span><small>{analysis.fonts.length}</small></div>
               {fontSummary.map((font) => <div className="font-row" key={font.family}>
                 <div><b>{font.family}</b><small>{font.slides.length}개 슬라이드 · {font.occurrences}회</small></div>
-                <span className={font.installed ? "installed" : "missing"}>{font.installed ? "설치됨" : "누락"}</span>
+                <span className={font.installed ? "installed" : "missing"}>{analysis.sourceType === "public-link" ? "감지됨" : font.embedded ? "문서 포함" : font.installed ? "설치됨" : "누락"}</span>
               </div>)}
               {analysis.fonts.length > 5 && <p className="more-fonts">외 {analysis.fonts.length - 5}개 글꼴</p>}
-              <div className="save-area">
-                <p>수정한 프레젠테이션을 새 파일로 저장합니다.</p>
-                <button className="primary-button" onClick={save}><Save size={17}/> 수정본 저장</button>
-                {savedMessage && <small className="saved-message">{savedMessage}</small>}
-              </div>
+              {analysis.sourceType === "public-link" ? <div className="save-area"><p>링크 검사는 위험 가능성을 빠르게 찾는 사전 검사입니다. 실제 PowerPoint 변환 결과는 PPTX 정밀 검사로 확인하세요.</p></div> : <div className="save-area">
+                  <p>수정한 프레젠테이션을 새 파일로 저장합니다.</p>
+                  <button className="primary-button" onClick={save}><Save size={17}/> 수정본 저장</button>
+                  {savedMessage && <small className="saved-message">{savedMessage}</small>}
+                </div>}
             </aside>
           </section>
         </main>
