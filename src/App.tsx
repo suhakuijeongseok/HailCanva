@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronRight, ExternalLink, FileUp, FileWarning, Link2, LoaderCircle, LogIn, Save, ShieldCheck, Type, X } from "lucide-react";
 import { analyzePptx, replaceFont } from "./lib/pptxAnalyzer";
-import type { PickedFile, PresentationAnalysis, Severity } from "./types";
+import type { PickedFile, PresentationAnalysis, Severity, SlideComparison } from "./types";
 
 const replacementOptions = ["맑은 고딕", "Noto Sans KR", "Arial", "Calibri"];
 
@@ -22,9 +22,12 @@ export default function App() {
   const [canvaConfigured, setCanvaConfigured] = useState(true);
   const [connectionMessage, setConnectionMessage] = useState("");
   const [needsConsent, setNeedsConsent] = useState(false);
+  const [slideComparisons, setSlideComparisons] = useState<SlideComparison[]>([]);
+  const [comparisonError, setComparisonError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   const currentSlide = analysis?.slides.find((slide) => slide.number === selectedSlide);
+  const currentComparison = slideComparisons.find((slide) => slide.slideNumber === selectedSlide);
   const riskCount = analysis?.slides.reduce((sum, slide) => sum + slide.risks.length, 0) ?? 0;
   const missingFonts = analysis?.fonts.filter((font) => !font.installed) ?? [];
   const level = analysis ? (analysis.score >= 75 ? "safe" : analysis.score >= 45 ? "warning" : "danger") : "safe";
@@ -36,6 +39,8 @@ export default function App() {
   const analyze = async (file: PickedFile) => {
     setLoading(true);
     setSavedMessage("");
+    setSlideComparisons([]);
+    setComparisonError("");
     try {
       const installedFonts = await window.hailCanva?.listFonts() ?? [];
       const result = await analyzePptx(file.bytes, file.name, installedFonts);
@@ -43,6 +48,18 @@ export default function App() {
       setWorkingBytes(file.bytes);
       setAnalysis(result);
       setSelectedSlide(result.slides[0]?.number ?? 1);
+      if (/^https?:\/\/(?:www\.)?canva\.com\//i.test(file.path) && window.hailCanva) {
+        setConnectionMessage("Canva 원본과 PowerPoint 변환 이미지를 만들고 있습니다.");
+        try {
+          const comparisons = await window.hailCanva.compareCanvaSlides(file.path, file.bytes);
+          setSlideComparisons(comparisons);
+          setConnectionMessage(comparisons.length ? "" : "비교할 슬라이드 이미지를 만들지 못했습니다.");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "슬라이드 비교 이미지를 만들지 못했습니다.";
+          setComparisonError(message);
+          setConnectionMessage(message);
+        }
+      }
     } catch (error) {
       alert(`파일을 분석하지 못했습니다.\n${error instanceof Error ? error.message : "알 수 없는 오류"}`);
     } finally {
@@ -207,7 +224,7 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">H</span><span>HailCanva</span><small>PowerPoint Preflight</small></div>
-        {analysis && <button className="secondary-button" onClick={() => { setAnalysis(null); setSource(null); }}><X size={16}/> 다른 파일</button>}
+        {analysis && <button className="secondary-button" onClick={() => { setAnalysis(null); setSource(null); setSlideComparisons([]); setComparisonError(""); }}><X size={16}/> 다른 파일</button>}
       </header>
 
       {!analysis ? (
@@ -292,6 +309,11 @@ export default function App() {
                 <div><span className="eyebrow">SLIDE {currentSlide?.number}</span><h2>{currentSlide?.title}</h2></div>
                 <span className={`severity-badge ${currentSlide?.severity}`}>{badgeLabel(currentSlide?.severity ?? "safe")}</span>
               </div>
+              {currentComparison && <div className="visual-comparison">
+                <figure><figcaption>Canva 원본</figcaption><img src={currentComparison.canvaImage} alt={`Canva 원본 ${currentComparison.slideNumber}페이지`}/></figure>
+                <figure><figcaption>PowerPoint 변환</figcaption><img src={currentComparison.powerpointImage} alt={`PowerPoint 변환 ${currentComparison.slideNumber}페이지`}/></figure>
+              </div>}
+              {!currentComparison && comparisonError && <div className="comparison-error"><AlertTriangle size={16}/><span>{comparisonError}</span></div>}
               <div className="text-preview"><span>텍스트 미리보기</span><p>{currentSlide?.textPreview || "텍스트가 없는 슬라이드입니다."}</p></div>
               <div className="risks">
                 <h3>위험 요소</h3>

@@ -3,6 +3,7 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { app, safeStorage, shell } from "electron";
+import JSZip from "jszip";
 
 const API_BASE = "https://api.canva.com/rest/v1";
 const AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize";
@@ -261,17 +262,48 @@ async function waitForExport(jobId: string): Promise<ExportJob> {
   throw new Error("Canva 내보내기 시간이 초과되었습니다.");
 }
 
+async function createExport(designId: string, format: Record<string, unknown>) {
+  const created = await canvaFetch<{ job: ExportJob }>("/exports", {
+    method: "POST",
+    body: JSON.stringify({ design_id: designId, format }),
+  });
+  return created.job.status === "success" ? created.job : waitForExport(created.job.id);
+}
+
+async function fetchExportImages(urls: string[]) {
+  const images: Uint8Array[] = [];
+  for (const url of urls) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("Canva 원본 이미지를 다운로드하지 못했습니다.");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const isZip = bytes[0] === 0x50 && bytes[1] === 0x4b;
+    if (!isZip) {
+      images.push(bytes);
+      continue;
+    }
+    const zip = await JSZip.loadAsync(bytes);
+    const entries = Object.values(zip.files)
+      .filter((entry) => !entry.dir && /\.(png|jpe?g)$/i.test(entry.name))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    for (const entry of entries) images.push(await entry.async("uint8array"));
+  }
+  return images;
+}
+
+export async function downloadCanvaPageImages(link: string) {
+  const designId = parseCanvaDesignId(link);
+  const job = await createExport(designId, { type: "png", as_single_image: false });
+  if (!job.urls?.length) throw new Error("Canva가 페이지 이미지 주소를 반환하지 않았습니다.");
+  return fetchExportImages(job.urls);
+}
+
 export async function downloadCanvaPptx(link: string): Promise<{ name: string; path: string; bytes: Uint8Array }> {
   const designId = parseCanvaDesignId(link);
   const metadata = await canvaFetch<{ design: { title?: string; design_types?: string[] } }>(`/designs/${encodeURIComponent(designId)}`);
   if (metadata.design.design_types && !metadata.design.design_types.includes("presentation")) {
     throw new Error("이 Canva 디자인은 프레젠테이션 형식이 아닙니다.");
   }
-  const created = await canvaFetch<{ job: ExportJob }>("/exports", {
-    method: "POST",
-    body: JSON.stringify({ design_id: designId, format: { type: "pptx" } }),
-  });
-  const job = created.job.status === "success" ? created.job : await waitForExport(created.job.id);
+  const job = await createExport(designId, { type: "pptx" });
   const downloadUrl = job.urls?.[0];
   if (!downloadUrl) throw new Error("Canva가 PPTX 다운로드 주소를 반환하지 않았습니다.");
   const response = await fetch(downloadUrl);

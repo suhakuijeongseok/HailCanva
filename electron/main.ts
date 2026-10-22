@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { connectCanva, connectionStatus, downloadCanvaPptx, initializeCanvaAuth } from "./canva";
 import { inspectPublicCanvaLink, openCanvaConsentWindow } from "./publicCanva";
 import { analyzePublicCanvaDesign } from "./publicDesignAnalyzer";
+import { createSlideComparisons } from "./slideComparison";
 
 const execFileAsync = promisify(execFile);
 
@@ -87,3 +88,4 @@ ipcMain.handle("canva:downloadPptx", (_event, link: string) => downloadCanvaPptx
 ipcMain.handle("canva:inspectPublic", (_event, link: string) => inspectPublicCanvaLink(link));
 ipcMain.handle("canva:openConsent", (_event, link: string) => openCanvaConsentWindow(link));
 ipcMain.handle("canva:analyzePublic", (_event, link: string) => analyzePublicCanvaDesign(link));
+ipcMain.handle("canva:compareSlides", (_event, link: string, bytes: Uint8Array) => createSlideComparisons(link, bytes));

@@ -46,6 +46,12 @@ export interface PickedFile {
   bytes: Uint8Array;
 }
 
+export interface SlideComparison {
+  slideNumber: number;
+  canvaImage: string;
+  powerpointImage: string;
+}
+
 declare global {
   interface Window {
     hailCanva?: {
@@ -63,6 +69,7 @@ declare global {
       }>;
       openCanvaConsent(link: string): Promise<void>;
       analyzePublicCanva(link: string): Promise<PresentationAnalysis>;
+      compareCanvaSlides(link: string, bytes: Uint8Array): Promise<SlideComparison[]>;
     };
   }
 }
