@@ -1,0 +1,186 @@
+import crypto from "node:crypto";
+import http from "node:http";
+import { shell } from "electron";
+
+const API_BASE = "https://api.canva.com/rest/v1";
+const AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize";
+
+type TokenResponse = {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+};
+
+type ExportJob = {
+  id: string;
+  status: "in_progress" | "success" | "failed";
+  urls?: string[];
+  error?: { code?: string; message?: string };
+};
+
+export type CanvaConnection = {
+  connected: boolean;
+  expiresAt?: number;
+  configured: boolean;
+};
+
+let accessToken: string | null = null;
+let tokenExpiresAt = 0;
+
+function config() {
+  const clientId = process.env.CANVA_CLIENT_ID?.trim();
+  const clientSecret = process.env.CANVA_CLIENT_SECRET?.trim();
+  const port = Number(process.env.CANVA_OAUTH_PORT || 47821);
+  const redirectUri = process.env.CANVA_REDIRECT_URI?.trim() || `http://127.0.0.1:${port}/oauth/callback`;
+  return { clientId, clientSecret, port, redirectUri };
+}
+
+export function connectionStatus(): CanvaConnection {
+  const { clientId, clientSecret } = config();
+  return {
+    connected: Boolean(accessToken && tokenExpiresAt > Date.now() + 30_000),
+    expiresAt: tokenExpiresAt || undefined,
+    configured: Boolean(clientId && clientSecret),
+  };
+}
+
+function base64Url(bytes: Buffer) {
+  return bytes.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function htmlPage(title: string, message: string, success: boolean) {
+  const color = success ? "#2f9e68" : "#d94e3d";
+  return `<!doctype html><html lang="ko"><meta charset="utf-8"><title>${title}</title>
+  <body style="margin:0;background:#f3f3ed;font-family:system-ui;color:#1d1d19;display:grid;place-items:center;height:100vh">
+  <main style="background:white;padding:42px;border-radius:20px;text-align:center;box-shadow:0 20px 60px #0001;max-width:440px">
+  <div style="font-size:36px;color:${color}">${success ? "✓" : "!"}</div><h1>${title}</h1><p>${message}</p>
+  <p style="color:#777;font-size:13px">이 창을 닫고 HailCanva로 돌아가세요.</p></main></body></html>`;
+}
+
+export async function connectCanva(): Promise<CanvaConnection> {
+  const { clientId, clientSecret, port, redirectUri } = config();
+  if (!clientId || !clientSecret) {
+    throw new Error("CANVA_CLIENT_ID와 CANVA_CLIENT_SECRET 환경변수를 먼저 설정해 주세요.");
+  }
+
+  const verifier = base64Url(crypto.randomBytes(64));
+  const challenge = base64Url(crypto.createHash("sha256").update(verifier).digest());
+  const state = base64Url(crypto.randomBytes(32));
+  const scopes = "design:meta:read design:content:read";
+  const authUrl = new URL(AUTHORIZE_URL);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  authUrl.searchParams.set("scope", scopes);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+
+  return new Promise<CanvaConnection>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      server.close();
+      if (error) reject(error);
+      else resolve(connectionStatus());
+    };
+
+    const server = http.createServer(async (request, response) => {
+      try {
+        const callbackUrl = new URL(request.url || "/", `http://127.0.0.1:${port}`);
+        if (callbackUrl.pathname !== "/oauth/callback") {
+          response.writeHead(404).end();
+          return;
+        }
+        const returnedState = callbackUrl.searchParams.get("state");
+        const code = callbackUrl.searchParams.get("code");
+        const oauthError = callbackUrl.searchParams.get("error");
+        if (oauthError) throw new Error(`Canva 인증이 취소되었거나 거부되었습니다: ${oauthError}`);
+        if (!code || returnedState !== state) throw new Error("Canva 인증 응답을 검증하지 못했습니다.");
+
+        const body = new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          code_verifier: verifier,
+          redirect_uri: redirectUri,
+        });
+        const tokenResponse = await fetch(`${API_BASE}/oauth/token`, {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body,
+        });
+        const tokenBody = await tokenResponse.json() as TokenResponse & { message?: string };
+        if (!tokenResponse.ok || !tokenBody.access_token) throw new Error(tokenBody.message || "Canva 토큰을 발급받지 못했습니다.");
+        accessToken = tokenBody.access_token;
+        tokenExpiresAt = Date.now() + tokenBody.expires_in * 1000;
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        response.end(htmlPage("Canva 연결 완료", "디자인 링크를 바로 검사할 수 있습니다.", true));
+        finish();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "알 수 없는 인증 오류";
+        response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+        response.end(htmlPage("Canva 연결 실패", message, false));
+        finish(new Error(message));
+      }
+    });
+
+    server.once("error", (error) => finish(new Error(`OAuth 콜백 서버를 열지 못했습니다: ${error.message}`)));
+    server.listen(port, "127.0.0.1", () => void shell.openExternal(authUrl.toString()));
+    const timeout = setTimeout(() => finish(new Error("Canva 인증 시간이 초과되었습니다.")), 180_000);
+  });
+}
+
+export function parseCanvaDesignId(input: string): string {
+  const trimmed = input.trim();
+  let url: URL;
+  try { url = new URL(trimmed); } catch { throw new Error("올바른 Canva 링크를 입력해 주세요."); }
+  if (url.hostname !== "www.canva.com" && url.hostname !== "canva.com") throw new Error("canva.com 링크만 사용할 수 있습니다.");
+  const match = url.pathname.match(/\/(?:design|d)\/([^/?#]+)/i);
+  if (!match?.[1]) throw new Error("링크에서 Canva 디자인 ID를 찾지 못했습니다.");
+  return decodeURIComponent(match[1]);
+}
+
+async function canvaFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!accessToken || tokenExpiresAt <= Date.now() + 30_000) throw new Error("Canva 연결이 만료되었습니다. 다시 연결해 주세요.");
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", ...init?.headers },
+  });
+  const body = await response.json() as T & { message?: string };
+  if (!response.ok) throw new Error(body.message || `Canva API 요청 실패 (${response.status})`);
+  return body;
+}
+
+async function waitForExport(jobId: string): Promise<ExportJob> {
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    const result = await canvaFetch<{ job: ExportJob }>(`/exports/${encodeURIComponent(jobId)}`);
+    if (result.job.status === "success") return result.job;
+    if (result.job.status === "failed") throw new Error(result.job.error?.message || "Canva PPTX 내보내기에 실패했습니다.");
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error("Canva 내보내기 시간이 초과되었습니다.");
+}
+
+export async function downloadCanvaPptx(link: string): Promise<{ name: string; path: string; bytes: Uint8Array }> {
+  const designId = parseCanvaDesignId(link);
+  const metadata = await canvaFetch<{ design: { title?: string; design_types?: string[] } }>(`/designs/${encodeURIComponent(designId)}`);
+  if (metadata.design.design_types && !metadata.design.design_types.includes("presentation")) {
+    throw new Error("이 Canva 디자인은 프레젠테이션 형식이 아닙니다.");
+  }
+  const created = await canvaFetch<{ job: ExportJob }>("/exports", {
+    method: "POST",
+    body: JSON.stringify({ design_id: designId, format: { type: "pptx" } }),
+  });
+  const job = created.job.status === "success" ? created.job : await waitForExport(created.job.id);
+  const downloadUrl = job.urls?.[0];
+  if (!downloadUrl) throw new Error("Canva가 PPTX 다운로드 주소를 반환하지 않았습니다.");
+  const response = await fetch(downloadUrl);
+  if (!response.ok) throw new Error("Canva PPTX 파일을 다운로드하지 못했습니다.");
+  const safeTitle = (metadata.design.title || "Canva-presentation").replace(/[<>:"/\\|?*]/g, "_");
+  return { name: `${safeTitle}.pptx`, path: link, bytes: new Uint8Array(await response.arrayBuffer()) };
+}

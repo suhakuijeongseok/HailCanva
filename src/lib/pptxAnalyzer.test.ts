@@ -1,0 +1,25 @@
+import JSZip from "jszip";
+import { describe, expect, it } from "vitest";
+import { analyzePptx, replaceFont } from "./pptxAnalyzer";
+
+async function fixture(font = "Rare Canva Font") {
+  const zip = new JSZip();
+  zip.file("ppt/slides/slide1.xml", `<?xml version="1.0"?><p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:rPr><a:latin typeface="${font}"/><a:ea typeface="${font}"/></a:rPr><a:t>Hello Canva</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+describe("pptx analyzer", () => {
+  it("finds a missing font per slide", async () => {
+    const result = await analyzePptx(await fixture(), "sample.pptx", ["Arial"]);
+    expect(result.slideCount).toBe(1);
+    expect(result.fonts[0].family).toBe("Rare Canva Font");
+    expect(result.slides[0].risks[0].category).toBe("missing-font");
+  });
+
+  it("replaces fonts without rebuilding the presentation", async () => {
+    const updated = await replaceFont(await fixture(), "Rare Canva Font", "Arial");
+    const result = await analyzePptx(updated, "sample.pptx", ["Arial"]);
+    expect(result.fonts[0].family).toBe("Arial");
+    expect(result.slides[0].risks).toHaveLength(0);
+  });
+});
