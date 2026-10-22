@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { connectCanva, connectionStatus, downloadCanvaPptx } from "./canva";
+import { connectCanva, connectionStatus, downloadCanvaPptx, initializeCanvaAuth } from "./canva";
 import { inspectPublicCanvaLink, openCanvaConsentWindow } from "./publicCanva";
 import { analyzePublicCanvaDesign } from "./publicDesignAnalyzer";
 
@@ -30,7 +30,8 @@ function createWindow() {
   else void window.loadFile(path.join(__dirname, "../dist/index.html"));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await initializeCanvaAuth();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

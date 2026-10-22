@@ -94,8 +94,16 @@ export default function App() {
     if (!window.hailCanva || !canvaLink.trim()) return;
     setLoading(true);
     setNeedsConsent(false);
-    setConnectionMessage("공개 여부와 PPTX 다운로드 가능 여부를 확인하고 있습니다.");
+    setConnectionMessage("Canva 연결 상태와 PPTX 다운로드 가능 여부를 확인하고 있습니다.");
     try {
+      const status = await refreshCanvaStatus();
+      if (status?.connected) {
+        setConnectionMessage("저장된 Canva 계정으로 PPTX를 가져오고 있습니다.");
+        const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
+        await analyze(file);
+        return;
+      }
+
       let publicResult = await window.hailCanva.inspectPublicCanva(canvaLink);
       if (publicResult.file) {
         setConnectionMessage(publicResult.message);
@@ -119,14 +127,6 @@ export default function App() {
           return;
         }
         setNeedsConsent(false);
-      }
-
-      const status = await refreshCanvaStatus();
-      if (status?.connected) {
-        setConnectionMessage(`${publicResult.message} 연결된 Canva 계정으로 다시 확인합니다.`);
-        const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
-        await analyze(file);
-        return;
       }
 
       setConnectionMessage(publicResult.message);

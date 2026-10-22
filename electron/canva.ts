@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import http from "node:http";
-import { shell } from "electron";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { app, safeStorage, shell } from "electron";
 
 const API_BASE = "https://api.canva.com/rest/v1";
 const AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize";
@@ -25,7 +27,50 @@ export type CanvaConnection = {
 };
 
 let accessToken: string | null = null;
+let refreshToken: string | null = null;
 let tokenExpiresAt = 0;
+let refreshPromise: Promise<void> | null = null;
+
+function tokenPath() {
+  return path.join(app.getPath("userData"), "canva-session.bin");
+}
+
+async function persistRefreshToken() {
+  if (!refreshToken) {
+    await fs.rm(tokenPath(), { force: true });
+    return;
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("Windows 보안 저장소를 사용할 수 없어 Canva 연결을 저장하지 못했습니다.");
+  }
+  const encrypted = safeStorage.encryptString(JSON.stringify({ refreshToken }));
+  const target = tokenPath();
+  const temporary = `${target}.tmp`;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(temporary, encrypted);
+  await fs.rename(temporary, target);
+}
+
+async function clearStoredToken() {
+  accessToken = null;
+  refreshToken = null;
+  tokenExpiresAt = 0;
+  await fs.rm(tokenPath(), { force: true });
+}
+
+export async function initializeCanvaAuth() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return;
+    const encrypted = await fs.readFile(tokenPath());
+    const stored = JSON.parse(safeStorage.decryptString(encrypted)) as { refreshToken?: string };
+    refreshToken = stored.refreshToken || null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") await clearStoredToken();
+    return;
+  }
+  if (refreshToken) await refreshAccessToken().catch(() => undefined);
+}
 
 function config() {
   const clientId = process.env.CANVA_CLIENT_ID?.trim();
@@ -38,10 +83,63 @@ function config() {
 export function connectionStatus(): CanvaConnection {
   const { clientId, clientSecret } = config();
   return {
-    connected: Boolean(accessToken && tokenExpiresAt > Date.now() + 30_000),
+    connected: Boolean(refreshToken || (accessToken && tokenExpiresAt > Date.now() + 30_000)),
     expiresAt: tokenExpiresAt || undefined,
     configured: Boolean(clientId && clientSecret),
   };
+}
+
+async function requestToken(body: URLSearchParams): Promise<TokenResponse & { message?: string }> {
+  const { clientId, clientSecret } = config();
+  if (!clientId || !clientSecret) throw new Error("CANVA_CLIENT_ID와 CANVA_CLIENT_SECRET 환경변수를 먼저 설정해 주세요.");
+  const response = await fetch(`${API_BASE}/oauth/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+  const token = await response.json() as TokenResponse & { message?: string };
+  if (!response.ok || !token.access_token) {
+    const error = new Error(token.message || "Canva 토큰을 발급받지 못했습니다.") as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
+  return token;
+}
+
+async function applyToken(token: TokenResponse) {
+  accessToken = token.access_token;
+  tokenExpiresAt = Date.now() + token.expires_in * 1000;
+  if (token.refresh_token) refreshToken = token.refresh_token;
+  await persistRefreshToken();
+}
+
+async function refreshAccessToken() {
+  if (refreshPromise) return refreshPromise;
+  if (!refreshToken) throw new Error("Canva 계정을 다시 연결해 주세요.");
+  refreshPromise = (async () => {
+    try {
+      const token = await requestToken(new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken! }));
+      await applyToken(token);
+    } catch (error) {
+      const status = (error as Error & { status?: number }).status;
+      accessToken = null;
+      tokenExpiresAt = 0;
+      if (status === 400 || status === 401) await clearStoredToken();
+      const guidance = status === 400 || status === 401 ? "다시 연결해 주세요." : "네트워크 연결을 확인한 뒤 다시 시도해 주세요.";
+      throw new Error(`저장된 Canva 연결을 갱신하지 못했습니다. ${guidance} ${error instanceof Error ? error.message : ""}`.trim());
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
+}
+
+async function ensureAccessToken(force = false) {
+  if (!force && accessToken && tokenExpiresAt > Date.now() + 60_000) return;
+  await refreshAccessToken();
 }
 
 function base64Url(bytes: Buffer) {
@@ -106,18 +204,8 @@ export async function connectCanva(): Promise<CanvaConnection> {
           code_verifier: verifier,
           redirect_uri: redirectUri,
         });
-        const tokenResponse = await fetch(`${API_BASE}/oauth/token`, {
-          method: "POST",
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body,
-        });
-        const tokenBody = await tokenResponse.json() as TokenResponse & { message?: string };
-        if (!tokenResponse.ok || !tokenBody.access_token) throw new Error(tokenBody.message || "Canva 토큰을 발급받지 못했습니다.");
-        accessToken = tokenBody.access_token;
-        tokenExpiresAt = Date.now() + tokenBody.expires_in * 1000;
+        const tokenBody = await requestToken(body);
+        await applyToken(tokenBody);
         response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         response.end(htmlPage("Canva 연결 완료", "디자인 링크를 바로 검사할 수 있습니다.", true));
         finish();
@@ -146,11 +234,18 @@ export function parseCanvaDesignId(input: string): string {
 }
 
 async function canvaFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!accessToken || tokenExpiresAt <= Date.now() + 30_000) throw new Error("Canva 연결이 만료되었습니다. 다시 연결해 주세요.");
-  const response = await fetch(`${API_BASE}${path}`, {
+  await ensureAccessToken();
+  let response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", ...init?.headers },
   });
+  if (response.status === 401) {
+    await ensureAccessToken(true);
+    response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", ...init?.headers },
+    });
+  }
   const body = await response.json() as T & { message?: string };
   if (!response.ok) throw new Error(body.message || `Canva API 요청 실패 (${response.status})`);
   return body;

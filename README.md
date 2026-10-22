@@ -63,6 +63,8 @@ CANVA_OAUTH_PORT=47821
 
 6. 앱을 다시 실행하고 **Canva 계정 연결**을 누릅니다. 브라우저에서 접근 권한을 허용한 뒤 디자인 링크를 입력합니다.
 
+최초 승인에서 받은 Refresh Token은 Electron의 `safeStorage`를 통해 Windows 사용자 계정에 묶인 형태로 암호화하여 앱 데이터 폴더에 저장합니다. 이후 실행부터는 인증 화면 없이 토큰을 자동 갱신하고 공식 Canva Export API를 먼저 사용합니다. Canva 연결 권한이 취소되거나 Refresh Token이 무효화된 경우에만 다시 승인을 요청합니다. Canva Refresh Token은 일회용으로 회전되므로 갱신할 때마다 새 토큰을 즉시 다시 저장합니다.
+
 Client Secret이 들어 있는 `.env`는 Git에 포함되지 않습니다. 현재 방식은 개발·개인 사용을 위한 로컬 OAuth broker입니다. 일반 사용자에게 앱을 배포할 때는 Client Secret을 앱에 포함하지 말고 별도의 HTTPS 인증 서버로 옮겨야 합니다.
 
 프로덕션 빌드:
