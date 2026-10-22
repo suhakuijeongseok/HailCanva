@@ -185,9 +185,15 @@ export default function App() {
       const status = await refreshCanvaStatus();
       if (status?.connected) {
         setConnectionMessage("저장된 Canva 계정으로 PPTX를 가져오고 있습니다.");
-        const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
-        await analyze(file);
-        return;
+        try {
+          const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
+          await analyze(file);
+          return;
+        } catch {
+          setConnectionMessage(
+            "연결된 계정에는 이 디자인의 직접 API 권한이 없습니다. 공유 링크 권한으로 다시 확인하고 있습니다.",
+          );
+        }
       }
 
       let publicResult = await window.hailCanva.inspectPublicCanva(canvaLink);
@@ -232,9 +238,15 @@ export default function App() {
       const status = await refreshCanvaStatus();
       if (status?.connected) {
         setConnectionMessage("연결된 Canva 계정으로 전체 PPTX를 가져와 검사하고 있습니다.");
-        const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
-        await analyze(file);
-        return;
+        try {
+          const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
+          await analyze(file);
+          return;
+        } catch {
+          setConnectionMessage(
+            "연결된 계정에는 이 디자인의 직접 API 권한이 없습니다. 공유 링크 화면을 분석하고 있습니다.",
+          );
+        }
       }
 
       setConnectionMessage("공개 Canva 슬라이드의 텍스트와 배치를 수집하고 있습니다.");
