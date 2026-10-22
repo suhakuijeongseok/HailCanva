@@ -137,6 +137,25 @@ export default function App() {
     }
   };
 
+  const analyzePublicLink = async () => {
+    if (!window.hailCanva || !canvaLink.trim()) return;
+    setLoading(true);
+    setNeedsConsent(false);
+    setConnectionMessage("공개 Canva 슬라이드의 텍스트와 배치를 수집하고 있습니다.");
+    try {
+      const result = await window.hailCanva.analyzePublicCanva(canvaLink);
+      setSource(null);
+      setWorkingBytes(null);
+      setAnalysis(result);
+      setSelectedSlide(result.slides[0]?.number ?? 1);
+      setConnectionMessage("");
+    } catch (error) {
+      setConnectionMessage(error instanceof Error ? error.message : "공개 Canva 디자인을 분석하지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const completeCanvaConsent = async () => {
     if (!window.hailCanva || !canvaLink.trim()) return;
     setLoading(true);
@@ -187,18 +206,21 @@ export default function App() {
           <section className="intro">
             <span className="eyebrow">CANVA → POWERPOINT</span>
             <h1>발표 전에,<br/><em>깨질 곳부터</em> 찾으세요.</h1>
-            <p>Canva에서 내려받은 PPTX의 글꼴과 텍스트, 특수 효과를 슬라이드별로 검사합니다.</p>
+            <p>공개 Canva 링크만으로 먼저 위험 요소를 찾고, 필요할 때만 PPTX 정밀 검사를 실행합니다.</p>
             <div className="feature-row">
               <span><Check size={16}/> 로컬 분석</span><span><Check size={16}/> 파일 외부 전송 없음</span><span><Check size={16}/> 수정본 저장</span>
             </div>
           </section>
           <section className="import-panel">
             <div className="link-import">
-              <div className="link-heading"><span className="link-icon"><Link2/></span><div><h2>Canva 링크로 검사</h2><p>공개 여부와 다운로드 가능 여부를 자동 확인합니다</p></div></div>
+              <div className="link-heading"><span className="link-icon"><Link2/></span><div><h2>Canva 링크로 검사</h2><p>다운로드 없이 슬라이드의 텍스트와 배치를 먼저 확인합니다</p></div></div>
               <label htmlFor="canva-link">Canva 디자인 링크</label>
               <div className="link-input-row">
                 <input id="canva-link" value={canvaLink} onChange={(event) => setCanvaLink(event.target.value)} placeholder="https://www.canva.com/design/DAG.../edit" onFocus={() => void refreshCanvaStatus()}/>
-                <button className="primary-button" onClick={() => void analyzeCanvaLink()} disabled={loading || !canvaLink.trim()}>검사 <ChevronRight size={17}/></button>
+              </div>
+              <div className="link-actions">
+                <button className="primary-button" onClick={() => void analyzePublicLink()} disabled={loading || !canvaLink.trim()}>링크 사전 검사 <ChevronRight size={17}/></button>
+                <button className="secondary-button" onClick={() => void analyzeCanvaLink()} disabled={loading || !canvaLink.trim()}>PPTX 정밀 검사</button>
               </div>
               <div className="connection-row">
                 <span className={`connection-dot ${canvaConnected ? "online" : ""}`}/>
@@ -227,25 +249,26 @@ export default function App() {
         <main className="dashboard">
           <section className="summary-panel">
             <div>
-              <span className="eyebrow">ANALYSIS COMPLETE</span>
+              <span className="eyebrow">{analysis.sourceType === "public-link" ? "LINK PREFLIGHT COMPLETE" : "ANALYSIS COMPLETE"}</span>
               <h1>{analysis.fileName}</h1>
-              <p>{analysis.slideCount}개 슬라이드 · {riskCount}개 잠재적 문제</p>
+              <p>{analysis.slideCount}개 슬라이드 · {riskCount}개 잠재적 문제{analysis.sourceType === "public-link" ? " · 링크 기반 추정" : ""}</p>
+              {analysis.scanNotice && <p className="scan-notice">{analysis.scanNotice}</p>}
             </div>
             <div className={`score-card ${level}`}>
               <div className="score-ring"><strong>{analysis.score}</strong><span>/ 100</span></div>
-              <div><b>호환성 점수</b><span>{level === "safe" ? "발표 준비가 양호합니다" : "수정 후 다시 확인하세요"}</span></div>
+              <div><b>{analysis.sourceType === "public-link" ? "사전 위험 점수" : "호환성 점수"}</b><span>{level === "safe" ? "발표 준비가 양호합니다" : "위험 요소를 확인하세요"}</span></div>
             </div>
           </section>
 
           <section className="stat-grid">
             <article><ShieldCheck/><div><strong>{analysis.slides.filter(s => s.severity === "safe").length}</strong><span>안전한 슬라이드</span></div></article>
             <article><FileWarning/><div><strong>{riskCount}</strong><span>발견된 위험 요소</span></div></article>
-            <article><Type/><div><strong>{missingFonts.length}</strong><span>누락된 글꼴</span></div></article>
+            <article><Type/><div><strong>{analysis.sourceType === "public-link" ? analysis.fonts.length : missingFonts.length}</strong><span>{analysis.sourceType === "public-link" ? "감지된 글꼴" : "누락된 글꼴"}</span></div></article>
           </section>
 
           <section className="workspace">
             <aside className="slide-list">
-              <div className="section-title"><span>슬라이드</span><small>{analysis.slideCount}</small></div>
+              <div className="section-title"><span>슬라이드</span><small>{analysis.scannedSlideCount === undefined ? analysis.slideCount : `${analysis.scannedSlideCount}/${analysis.slideCount} 검사`}</small></div>
               {analysis.slides.map((slide) => (
                 <button key={slide.number} className={selectedSlide === slide.number ? "selected" : ""} onClick={() => setSelectedSlide(slide.number)}>
                   <span className="slide-number">{String(slide.number).padStart(2, "0")}</span>
@@ -281,14 +304,14 @@ export default function App() {
               <div className="section-title"><span>사용 글꼴</span><small>{analysis.fonts.length}</small></div>
               {fontSummary.map((font) => <div className="font-row" key={font.family}>
                 <div><b>{font.family}</b><small>{font.slides.length}개 슬라이드 · {font.occurrences}회</small></div>
-                <span className={font.installed ? "installed" : "missing"}>{font.installed ? "설치됨" : "누락"}</span>
+                <span className={font.installed ? "installed" : "missing"}>{analysis.sourceType === "public-link" ? "감지됨" : font.installed ? "설치됨" : "누락"}</span>
               </div>)}
               {analysis.fonts.length > 5 && <p className="more-fonts">외 {analysis.fonts.length - 5}개 글꼴</p>}
-              <div className="save-area">
-                <p>수정한 프레젠테이션을 새 파일로 저장합니다.</p>
-                <button className="primary-button" onClick={save}><Save size={17}/> 수정본 저장</button>
-                {savedMessage && <small className="saved-message">{savedMessage}</small>}
-              </div>
+              {analysis.sourceType === "public-link" ? <div className="save-area"><p>링크 검사는 위험 가능성을 빠르게 찾는 사전 검사입니다. 실제 PowerPoint 변환 결과는 PPTX 정밀 검사로 확인하세요.</p></div> : <div className="save-area">
+                  <p>수정한 프레젠테이션을 새 파일로 저장합니다.</p>
+                  <button className="primary-button" onClick={save}><Save size={17}/> 수정본 저장</button>
+                  {savedMessage && <small className="saved-message">{savedMessage}</small>}
+                </div>}
             </aside>
           </section>
         </main>

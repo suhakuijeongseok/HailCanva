@@ -11,7 +11,7 @@ export interface Risk {
   id: string;
   slideNumber: number;
   severity: Exclude<Severity, "safe">;
-  category: "missing-font" | "text-density" | "unsupported-effect";
+  category: "missing-font" | "text-density" | "unsupported-effect" | "small-text" | "long-token" | "edge-proximity" | "media";
   title: string;
   detail: string;
   fontFamily?: string;
@@ -33,6 +33,10 @@ export interface PresentationAnalysis {
   fonts: FontUsage[];
   slides: SlideAnalysis[];
   analyzedAt: string;
+  sourceType?: "pptx" | "public-link";
+  confidence?: "preflight" | "exact";
+  scannedSlideCount?: number;
+  scanNotice?: string;
 }
 
 export interface PickedFile {
@@ -57,6 +61,7 @@ declare global {
         file?: PickedFile;
       }>;
       openCanvaConsent(link: string): Promise<void>;
+      analyzePublicCanva(link: string): Promise<PresentationAnalysis>;
     };
   }
 }

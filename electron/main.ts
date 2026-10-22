@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { connectCanva, connectionStatus, downloadCanvaPptx } from "./canva";
 import { inspectPublicCanvaLink, openCanvaConsentWindow } from "./publicCanva";
+import { analyzePublicCanvaDesign } from "./publicDesignAnalyzer";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,3 +85,4 @@ ipcMain.handle("canva:connect", () => connectCanva());
 ipcMain.handle("canva:downloadPptx", (_event, link: string) => downloadCanvaPptx(link));
 ipcMain.handle("canva:inspectPublic", (_event, link: string) => inspectPublicCanvaLink(link));
 ipcMain.handle("canva:openConsent", (_event, link: string) => openCanvaConsentWindow(link));
+ipcMain.handle("canva:analyzePublic", (_event, link: string) => analyzePublicCanvaDesign(link));
