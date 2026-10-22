@@ -141,8 +141,17 @@ export default function App() {
     if (!window.hailCanva || !canvaLink.trim()) return;
     setLoading(true);
     setNeedsConsent(false);
-    setConnectionMessage("공개 Canva 슬라이드의 텍스트와 배치를 수집하고 있습니다.");
+    setConnectionMessage("Canva 연결 상태를 확인하고 있습니다.");
     try {
+      const status = await refreshCanvaStatus();
+      if (status?.connected) {
+        setConnectionMessage("연결된 Canva 계정으로 전체 PPTX를 가져와 검사하고 있습니다.");
+        const file = await window.hailCanva.downloadCanvaPptx(canvaLink);
+        await analyze(file);
+        return;
+      }
+
+      setConnectionMessage("공개 Canva 슬라이드의 텍스트와 배치를 수집하고 있습니다.");
       const result = await window.hailCanva.analyzePublicCanva(canvaLink);
       setSource(null);
       setWorkingBytes(null);
