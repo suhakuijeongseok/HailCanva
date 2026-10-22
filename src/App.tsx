@@ -313,7 +313,7 @@ export default function App() {
               <div className="section-title"><span>사용 글꼴</span><small>{analysis.fonts.length}</small></div>
               {fontSummary.map((font) => <div className="font-row" key={font.family}>
                 <div><b>{font.family}</b><small>{font.slides.length}개 슬라이드 · {font.occurrences}회</small></div>
-                <span className={font.installed ? "installed" : "missing"}>{analysis.sourceType === "public-link" ? "감지됨" : font.installed ? "설치됨" : "누락"}</span>
+                <span className={font.installed ? "installed" : "missing"}>{analysis.sourceType === "public-link" ? "감지됨" : font.embedded ? "문서 포함" : font.installed ? "설치됨" : "누락"}</span>
               </div>)}
               {analysis.fonts.length > 5 && <p className="more-fonts">외 {analysis.fonts.length - 5}개 글꼴</p>}
               {analysis.sourceType === "public-link" ? <div className="save-area"><p>링크 검사는 위험 가능성을 빠르게 찾는 사전 검사입니다. 실제 PowerPoint 변환 결과는 PPTX 정밀 검사로 확인하세요.</p></div> : <div className="save-area">

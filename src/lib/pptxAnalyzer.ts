@@ -47,6 +47,23 @@ function getFonts(doc: unknown): string[] {
   return fonts;
 }
 
+function normalizeFontName(font: string) {
+  return font.normalize("NFKC").replace(/^@/, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function getEmbeddedFonts(doc: unknown): string[] {
+  const fonts: string[] = [];
+  walk(doc, (key, value) => {
+    if (key !== "p:embeddedFont" || !value || typeof value !== "object") return;
+    for (const font of arrayify((value as Record<string, unknown>)["p:font"])) {
+      if (!font || typeof font !== "object") continue;
+      const typeface = (font as Record<string, unknown>)["@_typeface"];
+      if (typeof typeface === "string" && typeface.trim()) fonts.push(typeface.trim());
+    }
+  });
+  return fonts;
+}
+
 function getTextBoxDensityRisks(doc: unknown, slideNumber: number): Risk[] {
   const risks: Risk[] = [];
   let index = 0;
@@ -100,7 +117,9 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
   const slideFiles = Object.keys(zip.files)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
     .sort((a, b) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
-  const installed = new Set(installedFonts.map((font) => font.toLocaleLowerCase()));
+  const presentationXml = await zip.file("ppt/presentation.xml")?.async("string");
+  const embedded = new Set(presentationXml ? getEmbeddedFonts(parser.parse(presentationXml)).map(normalizeFontName) : []);
+  const installed = new Set(installedFonts.map(normalizeFontName));
   const usage = new Map<string, { count: number; slides: Set<number> }>();
   const slides: SlideAnalysis[] = [];
 
@@ -120,8 +139,8 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
     }
 
     for (const font of new Set(fonts)) {
-      const normalized = font.toLocaleLowerCase();
-      if (!installed.has(normalized)) {
+      const normalized = normalizeFontName(font);
+      if (!installed.has(normalized) && !embedded.has(normalized)) {
         risks.push({
           id: `font-${slideNumber}-${font}`,
           slideNumber,
@@ -148,7 +167,8 @@ export async function analyzePptx(bytes: Uint8Array, fileName: string, installed
 
   const fonts: FontUsage[] = [...usage.entries()].map(([family, data]) => ({
     family,
-    installed: installed.has(family.toLocaleLowerCase()),
+    installed: installed.has(normalizeFontName(family)) || embedded.has(normalizeFontName(family)),
+    embedded: embedded.has(normalizeFontName(family)),
     occurrences: data.count,
     slides: [...data.slides].sort((a, b) => a - b),
   })).sort((a, b) => Number(a.installed) - Number(b.installed) || b.occurrences - a.occurrences);

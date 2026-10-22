@@ -3,6 +3,7 @@ export type Severity = "safe" | "warning" | "danger";
 export interface FontUsage {
   family: string;
   installed: boolean;
+  embedded?: boolean;
   occurrences: number;
   slides: number[];
 }
