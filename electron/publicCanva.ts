@@ -39,7 +39,7 @@ async function pageSignals(window: BrowserWindow) {
   }))()` ) as Promise<{ url: string; title: string; text: string; visualCount: number }>;
 }
 
-function watchForPptxDownload(downloadSession: Electron.Session, destination: string) {
+function watchForPptxDownload(downloadSession: Electron.Session, destination: string, timeoutMs = 45_000) {
   let cancel: () => void = () => {};
   const promise = new Promise<{ path: string; name: string } | null>((resolve) => {
     let completed = false;
@@ -61,7 +61,7 @@ function watchForPptxDownload(downloadSession: Electron.Session, destination: st
       item.once("done", (_doneEvent, state) => finish(state === "completed" ? { path: filePath, name } : null));
     };
     downloadSession.on("will-download", listener);
-    const timeout = setTimeout(() => finish(null), 45_000);
+    const timeout = setTimeout(() => finish(null), timeoutMs);
     cancel = () => finish(null);
   });
   return { promise, cancel };
@@ -154,8 +154,9 @@ function publicSession() {
   return session.fromPartition("persist:hailcanva-public", { cache: false });
 }
 
-export async function openCanvaConsentWindow(link: string): Promise<void> {
+export async function openCanvaConsentWindow(link: string): Promise<PublicCanvaInspection["file"] | null> {
   const resolvedLink = await resolveCanvaLink(link);
+  const webSession = publicSession();
   const window = new BrowserWindow({
     show: true,
     width: 1180,
@@ -163,18 +164,46 @@ export async function openCanvaConsentWindow(link: string): Promise<void> {
     title: "HailCanva - Canva 동의 확인",
     autoHideMenuBar: true,
     webPreferences: {
-      session: publicSession(),
+      session: webSession,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   });
-  await window.loadURL(resolvedLink);
-  await wait(2_000);
-  await dismissCookieBanner(window);
-  window.show();
-  window.focus();
-  await new Promise<void>((resolve) => window.once("closed", () => resolve()));
+  const tempDirectory = await fs.mkdtemp(path.join(app.getPath("temp"), "hailcanva-interactive-"));
+  const downloadWatcher = watchForPptxDownload(webSession, tempDirectory, 180_000);
+  let closed = false;
+  const closedPromise = new Promise<null>((resolve) => window.once("closed", () => { closed = true; resolve(null); }));
+  try {
+    await window.loadURL(resolvedLink);
+    await wait(2_000);
+    await dismissCookieBanner(window);
+    window.show();
+    window.focus();
+
+    // Never accept terms or sign in for the user. Once the user has completed
+    // those steps (or the editor was already available), drive the export in
+    // this same visible, authenticated web session.
+    for (let attempt = 0; attempt < 6 && !closed; attempt += 1) {
+      const signals = await pageSignals(window);
+      const loginPage = /\/login(?:[/?#]|$)/i.test(new URL(signals.url).pathname);
+      if (!loginPage && !hasConsentGate(signals.text) && !isAccessDenied(signals)) {
+        const initiated = await attemptDownload(window);
+        if (initiated) break;
+      }
+      await Promise.race([wait(2_500), closedPromise]);
+    }
+
+    const downloaded = await Promise.race([downloadWatcher.promise, closedPromise]);
+    if (!downloaded) return null;
+    const bytes = await fs.readFile(downloaded.path);
+    if (!window.isDestroyed()) window.destroy();
+    return { name: downloaded.name, path: link, bytes };
+  } finally {
+    downloadWatcher.cancel();
+    if (!window.isDestroyed()) window.destroy();
+    await fs.rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function inspectPublicCanvaLink(link: string): Promise<PublicCanvaInspection> {

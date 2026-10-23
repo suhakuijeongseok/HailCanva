@@ -69,7 +69,7 @@ declare global {
         message: string;
         file?: PickedFile;
       }>;
-      openCanvaConsent(link: string): Promise<void>;
+      openCanvaConsent(link: string): Promise<PickedFile | null>;
       analyzePublicCanva(link: string): Promise<PresentationAnalysis>;
       compareCanvaSlides(link: string, bytes: Uint8Array): Promise<SlideComparison[]>;
     };

@@ -205,7 +205,13 @@ export default function App() {
       if (publicResult.download === "consent_required") {
         setNeedsConsent(true);
         setConnectionMessage("Canva 이용 약관 확인 창을 엽니다. 내용을 직접 확인한 뒤 창을 닫아 주세요.");
-        await window.hailCanva.openCanvaConsent(canvaLink);
+        const interactiveFile = await window.hailCanva.openCanvaConsent(canvaLink);
+        if (interactiveFile) {
+          setNeedsConsent(false);
+          setConnectionMessage("Canva 웹 창에서 PPTX를 가져왔습니다.");
+          await analyze(interactiveFile);
+          return;
+        }
         setConnectionMessage("동의 상태와 다운로드 가능 여부를 다시 확인하고 있습니다.");
         publicResult = await window.hailCanva.inspectPublicCanva(canvaLink);
         if (publicResult.file) {
@@ -277,7 +283,13 @@ export default function App() {
     setLoading(true);
     setConnectionMessage("열린 Canva 창에서 약관 동의 또는 로그인을 완료한 뒤 창을 닫아 주세요.");
     try {
-      await window.hailCanva.openCanvaConsent(canvaLink);
+      const interactiveFile = await window.hailCanva.openCanvaConsent(canvaLink);
+      if (interactiveFile) {
+        setNeedsConsent(false);
+        setConnectionMessage("Canva 웹 창에서 PPTX를 가져왔습니다.");
+        await analyze(interactiveFile);
+        return;
+      }
       setNeedsConsent(false);
       setLoading(false);
       await analyzeCanvaLink();
