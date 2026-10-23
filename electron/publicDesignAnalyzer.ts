@@ -58,23 +58,45 @@ async function clickText(window: BrowserWindow, pattern: string) {
 async function readDocumentInfo(window: BrowserWindow) {
   return window.webContents.executeJavaScript(`(() => {
     const text = document.body?.innerText || '';
-    const pageNumbers = [...document.querySelectorAll('[aria-label]')]
-      .map((node) => (node.getAttribute('aria-label') || '').match(/^(\\d+)\\s*페이지$/)?.[1])
-      .filter(Boolean).map(Number);
-    const counter = text.match(/페이지\\s*[  ]*(\\d+)\\s*\\/\\s*(\\d+)/);
+    const pageNumber = (label) => {
+      const value = (label || '').trim();
+      const match = value.match(/^(?:page|페이지)\\s*(\\d+)\\s*(?:of|중|\\/)\\s*\\d+$/i)
+        || value.match(/^(?:page|페이지)\\s*(\\d+)(?:\\s*(?:thumbnail|썸네일))?$/i)
+        || value.match(/^(\\d+)\\s*(?:page|페이지)(?:\\s*(?:thumbnail|썸네일))?$/i);
+      return match ? Number(match[1]) : null;
+    };
+    const ariaLabels = [...document.querySelectorAll('[aria-label]')].map((node) => node.getAttribute('aria-label') || '');
+    const pageNumbers = ariaLabels
+      .map((label) => pageNumber(label))
+      .filter((value) => Number.isFinite(value));
+    const ariaTotals = ariaLabels.map((label) => {
+      const match = label.trim().match(/^(?:page|페이지)\\s*\\d+\\s*(?:of|중|\\/)\\s*(\\d+)$/i);
+      return match ? Number(match[1]) : 0;
+    });
+    const slashCounter = text.match(/(?:페이지|page)?\\s*(\\d+)\\s*\\/\\s*(\\d+)/i);
+    const ofCounter = text.match(/(?:페이지|page)\\s*(\\d+)\\s*(?:of|중)\\s*(\\d+)/i);
+    const total = Number((slashCounter || ofCounter)?.[2] || 0);
     return {
       title: document.title.replace(/\\s*-\\s*프레젠테이션.*$/, '').trim() || 'Canva 프레젠테이션',
-      pageCount: Math.max(counter ? Number(counter[2]) : 0, ...pageNumbers, 1),
+      pageCount: Math.max(total, ...ariaTotals, ...pageNumbers, 1),
       denied: /request access to this design|you need permission to access|you don't have access to this design|access denied|이 디자인.{0,20}(?:권한 요청|액세스할 수 없습니다|권한이 필요)|page not found|페이지를 찾을 수 없습니다/i.test(text),
-      login: /\\/login(?:[/?#]|$)/i.test(location.pathname)
+      login: /\\/login(?:[/?#]|$)/i.test(location.pathname),
+      consent: /canva 이용 약관|canva terms of use/i.test(text) && /동의 및 계속하기|agree and continue/i.test(text)
     };
-  })()` ) as Promise<{ title: string; pageCount: number; denied: boolean; login: boolean }>;
+  })()` ) as Promise<{ title: string; pageCount: number; denied: boolean; login: boolean; consent: boolean }>;
 }
 
 async function selectPage(window: BrowserWindow, page: number) {
   const point = await window.webContents.executeJavaScript(`(() => {
-    const labels = [${JSON.stringify(`${page} 페이지`)}, ${JSON.stringify(`${page}페이지`)}];
-    const candidates = [...document.querySelectorAll('[aria-label]')].filter((node) => labels.includes(node.getAttribute('aria-label')));
+    const page = ${page};
+    const pageNumber = (label) => {
+      const value = (label || '').trim();
+      const match = value.match(/^(?:page|페이지)\\s*(\\d+)\\s*(?:of|중|\\/)\\s*\\d+$/i)
+        || value.match(/^(?:page|페이지)\\s*(\\d+)(?:\\s*(?:thumbnail|썸네일))?$/i)
+        || value.match(/^(\\d+)\\s*(?:page|페이지)(?:\\s*(?:thumbnail|썸네일))?$/i);
+      return match ? Number(match[1]) : null;
+    };
+    const candidates = [...document.querySelectorAll('[aria-label]')].filter((node) => pageNumber(node.getAttribute('aria-label')) === page);
     const thumbnail = candidates.find((node) => {
       const rect = node.getBoundingClientRect(); return rect.width > 20 && rect.height > 20;
     }) || candidates[0];
@@ -84,22 +106,35 @@ async function selectPage(window: BrowserWindow, page: number) {
     const rect = thumbnail.getBoundingClientRect();
     return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
   })()`);
-  if (!point) return false;
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
-  await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
-  await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
-  await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-  await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  if (point) {
+    await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    return true;
+  }
+  if (page === 1) return true;
+  // Canva virtualizes long thumbnail lists. When the requested thumbnail is not
+  // mounted in the DOM, move from the currently selected page with the keyboard.
+  await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 });
+  await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 });
   return true;
 }
 
 async function readCurrentPage(window: BrowserWindow, page: number): Promise<PageSnapshot> {
   return window.webContents.executeJavaScript(`(() => {
     const page = ${page};
-    const exact = new RegExp('^' + page + '\\s*페이지$');
-    const pageGroups = [...document.querySelectorAll('[role="group"][aria-label]')]
-      .filter((node) => /^(\d+)\s*페이지$/.test(node.getAttribute('aria-label') || ''));
-    const pageGroup = pageGroups.find((node) => exact.test(node.getAttribute('aria-label') || ''));
+    const pageNumber = (label) => {
+      const value = (label || '').trim();
+      const match = value.match(/^(?:page|페이지)\\s*(\\d+)\\s*(?:of|중|\\/)\\s*\\d+$/i)
+        || value.match(/^(?:page|페이지)\\s*(\\d+)(?:\\s*(?:thumbnail|썸네일))?$/i)
+        || value.match(/^(\\d+)\\s*(?:page|페이지)(?:\\s*(?:thumbnail|썸네일))?$/i);
+      return match ? Number(match[1]) : null;
+    };
+    const pageGroups = [...document.querySelectorAll('[aria-label]')]
+      .filter((node) => pageNumber(node.getAttribute('aria-label')) !== null);
+    const pageGroup = pageGroups.find((node) => pageNumber(node.getAttribute('aria-label')) === page);
     const appNode = document.querySelector('[role="application"][aria-label*="Canvas" i], [role="application"][aria-label*="캔버스" i]');
     let canvas = appNode;
     while (canvas && canvas.parentElement) {
@@ -127,13 +162,16 @@ async function readCurrentPage(window: BrowserWindow, page: number): Promise<Pag
     }) : [];
     const fallbackText = pageGroup ? (pageGroup.textContent || '').trim() : '';
     const visibleText = [...new Set(elements.map((item) => item.text))];
+    const bodyText = document.body?.innerText || '';
+    const slashCounter = bodyText.match(/(?:페이지|page)?\\s*(\\d+)\\s*\\/\\s*(\\d+)/i);
+    const ofCounter = bodyText.match(/(?:페이지|page)\\s*(\\d+)\\s*(?:of|중)\\s*(\\d+)/i);
+    const counterPage = Number((slashCounter || ofCounter)?.[1] || 0) || null;
     return {
       page,
       activePage: pageGroups.map((node) => {
         const rect = node.getBoundingClientRect();
-        const match = (node.getAttribute('aria-label') || '').match(/^(\d+)\s*페이지$/);
-        return { page: match ? Number(match[1]) : null, area: rect.width * rect.height };
-      }).sort((a, b) => b.area - a.area)[0]?.page || null,
+        return { page: pageNumber(node.getAttribute('aria-label')), area: rect.width * rect.height };
+      }).sort((a, b) => b.area - a.area)[0]?.page || counterPage,
       text: visibleText.length ? visibleText : (fallbackText ? [fallbackText] : []),
       elements,
       hasMedia: Boolean(canvas?.querySelector('video, audio'))
@@ -179,7 +217,9 @@ export async function analyzePublicCanvaDesign(link: string): Promise<PublicDesi
     await clickText(window, "^(모든 쿠키 허용|accept all)");
     await wait(700);
     const info = await readDocumentInfo(window);
-    if (info.denied || info.login) throw new Error("공개적으로 접근할 수 없는 Canva 링크입니다.");
+    if (info.denied) throw new Error("공개적으로 접근할 수 없는 Canva 링크입니다.");
+    if (info.login) throw new Error("Canva 웹 로그인이 필요합니다. Canva 웹 권한 창에서 로그인한 뒤 다시 검사해 주세요.");
+    if (info.consent) throw new Error("Canva 웹 약관 동의 또는 로그인이 필요합니다. Canva 웹 권한 창에서 완료한 뒤 다시 검사해 주세요.");
     const zoomText = await window.webContents.executeJavaScript(`document.body?.innerText || ''`) as string;
     const zoomMatch = zoomText.match(/(?:^|\n)(\d{1,3})%(?:\n|$)/);
     const zoom = zoomMatch ? Number(zoomMatch[1]) / 100 : 0.5;

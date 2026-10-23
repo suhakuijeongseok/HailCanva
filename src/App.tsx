@@ -218,10 +218,17 @@ export default function App() {
           setConnectionMessage("Canva 약관 동의가 완료되지 않았습니다. 아래 버튼을 눌러 다시 확인해 주세요.");
           return;
         }
-        setNeedsConsent(false);
+        setNeedsConsent(publicResult.download !== "pptx");
       }
 
-      setConnectionMessage(publicResult.message);
+      if (publicResult.download === "disabled" || publicResult.download === "failed") {
+        setNeedsConsent(true);
+        setConnectionMessage(
+          `${publicResult.message} 아래 버튼으로 Canva 웹 창을 열어 같은 계정으로 로그인한 뒤 창을 닫고 다시 시도해 주세요.`,
+        );
+      } else {
+        setConnectionMessage(publicResult.message);
+      }
     } catch (error) {
       setConnectionMessage(error instanceof Error ? error.message : "Canva 링크를 가져오지 못했습니다.");
     } finally {
@@ -257,7 +264,9 @@ export default function App() {
       setSelectedSlide(result.slides[0]?.number ?? 1);
       setConnectionMessage("");
     } catch (error) {
-      setConnectionMessage(error instanceof Error ? error.message : "공개 Canva 디자인을 분석하지 못했습니다.");
+      const message = error instanceof Error ? error.message : "공개 Canva 디자인을 분석하지 못했습니다.";
+      if (/약관|로그인|권한 창/.test(message)) setNeedsConsent(true);
+      setConnectionMessage(message);
     } finally {
       setLoading(false);
     }
@@ -266,7 +275,7 @@ export default function App() {
   const completeCanvaConsent = async () => {
     if (!window.hailCanva || !canvaLink.trim()) return;
     setLoading(true);
-    setConnectionMessage("열린 Canva 창에서 약관을 직접 확인한 뒤 창을 닫아 주세요.");
+    setConnectionMessage("열린 Canva 창에서 약관 동의 또는 로그인을 완료한 뒤 창을 닫아 주세요.");
     try {
       await window.hailCanva.openCanvaConsent(canvaLink);
       setNeedsConsent(false);
@@ -331,11 +340,11 @@ export default function App() {
               </div>
               <div className="connection-row">
                 <span className={`connection-dot ${canvaConnected ? "online" : ""}`}/>
-                <span>{canvaConnected ? "Canva 연결됨 · 비공개 링크도 검사 가능" : "공개 링크는 계정 연결 없이 검사"}</span>
+                <span>{canvaConnected ? "Canva 연결됨 · 소유하거나 직접 공유받은 디자인 정밀 검사" : "공개 링크는 계정 연결 없이 검사"}</span>
                 {!canvaConnected && canvaConfigured && <button onClick={() => void connect()}><LogIn size={14}/> 비공개 링크 연결</button>}
               </div>
               {connectionMessage && <p className="connection-message">{connectionMessage}</p>}
-              {needsConsent && <button className="consent-button" onClick={() => void completeCanvaConsent()} disabled={loading}><ExternalLink size={14}/> Canva 동의 창 열기</button>}
+              {needsConsent && <button className="consent-button" onClick={() => void completeCanvaConsent()} disabled={loading}><ExternalLink size={14}/> Canva 웹 권한 창 열기</button>}
             </div>
             <div className="divider"><span>또는</span></div>
             <div
