@@ -65,7 +65,7 @@ async function readDocumentInfo(window: BrowserWindow) {
     return {
       title: document.title.replace(/\\s*-\\s*프레젠테이션.*$/, '').trim() || 'Canva 프레젠테이션',
       pageCount: Math.max(counter ? Number(counter[2]) : 0, ...pageNumbers, 1),
-      denied: /request access|access denied|you need permission|권한 요청|액세스 권한|page not found|페이지를 찾을 수 없습니다/i.test(text),
+      denied: /request access to this design|you need permission to access|you don't have access to this design|access denied|이 디자인.{0,20}(?:권한 요청|액세스할 수 없습니다|권한이 필요)|page not found|페이지를 찾을 수 없습니다/i.test(text),
       login: /\\/login(?:[/?#]|$)/i.test(location.pathname)
     };
   })()` ) as Promise<{ title: string; pageCount: number; denied: boolean; login: boolean }>;

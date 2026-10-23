@@ -16,7 +16,7 @@ const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resol
 async function clickMatching(window: BrowserWindow, patterns: string[]) {
   return window.webContents.executeJavaScript(`(() => {
     const patterns = ${JSON.stringify(patterns)}.map((value) => new RegExp(value, "i"));
-    const nodes = [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="option"]')];
+    const nodes = [...document.querySelectorAll('button, a, select, [role="button"], [role="combobox"], [role="menuitem"], [role="option"]')];
     const visible = (node) => {
       const style = getComputedStyle(node); const rect = node.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
@@ -77,12 +77,54 @@ async function attemptDownload(window: BrowserWindow) {
       clicked = await clickMatching(window, ["^download$", "^다운로드$", "download.*design", "디자인.*다운로드"]);
     }
   }
+  if (!clicked) {
+    clicked = await clickMatching(window, ["^file$", "^파일$"]);
+    if (clicked) {
+      await wait(1_200);
+      clicked = await clickMatching(window, ["^download$", "^다운로드$", "download.*design", "디자인.*다운로드"]);
+    }
+  }
   if (!clicked) return false;
   await wait(1_500);
-  await clickMatching(window, ["microsoft powerpoint", "powerpoint", "pptx", "파워포인트"]);
+  const formatMenuOpened = await clickMatching(window, [
+    "^file type$", "^파일 형식$", "file type.*(?:pdf|powerpoint)", "파일 형식.*(?:pdf|파워포인트)",
+    "^pdf standard$", "^pdf 표준$", "^microsoft powerpoint$",
+  ]);
+  if (formatMenuOpened) await wait(700);
+  const powerpointSelected = await clickMatching(window, ["microsoft powerpoint", "powerpoint", "pptx", "파워포인트"]);
+  if (!powerpointSelected) return false;
   await wait(900);
-  await clickMatching(window, ["^download$", "^다운로드$", "download.*pages", "페이지.*다운로드"]);
-  return true;
+  return clickMatching(window, ["^download$", "^다운로드$", "download.*pages", "페이지.*다운로드"]);
+}
+
+function isAccessDenied(signals: { url: string; text: string }) {
+  const normalized = signals.text.toLocaleLowerCase();
+  const deniedPhrases = [
+    "request access to this design",
+    "you need permission to access",
+    "you don't have access to this design",
+    "access denied",
+    "이 디자인에 대한 액세스 권한 요청",
+    "이 디자인에 액세스할 수 없습니다",
+    "이 디자인을 보려면 권한이 필요합니다",
+    "페이지를 찾을 수 없습니다",
+    "page not found",
+  ];
+  return /\/login(?:[/?#]|$)/i.test(new URL(signals.url).pathname)
+    || deniedPhrases.some((phrase) => normalized.includes(phrase));
+}
+
+async function waitForCanvaPage(window: BrowserWindow, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = await pageSignals(window);
+  while (Date.now() < deadline) {
+    latest = await pageSignals(window);
+    if (isAccessDenied(latest) || hasConsentGate(latest.text)) return latest;
+    const meaningfulText = latest.text.trim().length >= 40;
+    if (meaningfulText && latest.visualCount > 0) return latest;
+    await wait(500);
+  }
+  return latest;
 }
 
 async function dismissCookieBanner(window: BrowserWindow) {
@@ -155,18 +197,21 @@ export async function inspectPublicCanvaLink(link: string): Promise<PublicCanvaI
   const downloadWatcher = watchForPptxDownload(isolatedSession, tempDirectory);
   try {
     await window.loadURL(resolvedLink, { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" });
-    await wait(5_000);
+    await wait(1_500);
     await dismissCookieBanner(window);
-    const signals = await pageSignals(window);
-    const normalized = `${signals.url}\n${signals.title}\n${signals.text}`.toLocaleLowerCase();
-    const denied = ["request access", "access denied", "you need permission", "권한 요청", "액세스 권한", "페이지를 찾을 수 없습니다", "page not found"]
-      .some((phrase) => normalized.includes(phrase));
-    const loginRedirect = /\/login(?:[/?#]|$)/i.test(new URL(signals.url).pathname);
-    if (denied || loginRedirect || signals.visualCount === 0) {
+    const signals = await waitForCanvaPage(window);
+    if (isAccessDenied(signals)) {
       return {
         access: "private",
         download: "disabled",
         message: "로그인이나 접근 권한이 필요한 Canva 링크입니다. 소유자가 공개 보기·다운로드를 허용해야 합니다.",
+      };
+    }
+    if (signals.text.trim().length < 40 && signals.visualCount === 0) {
+      return {
+        access: "unreachable",
+        download: "failed",
+        message: "Canva 디자인 화면이 제한 시간 안에 로드되지 않았습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.",
       };
     }
     if (hasConsentGate(signals.text)) {
